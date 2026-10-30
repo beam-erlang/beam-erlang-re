@@ -1,0 +1,14 @@
+format = 1
+[package]
+name = "erlangsters/re"
+version = "0.0.1"
+[build]
+sources = ["src/re.erl", "src/beam_re_errors.erl"]
+[build.native]
+cmake = "."
+outputs = ["re"]
+nifs = { re = "re" }
+[exports]
+licenses = ["LICENSE.txt", "vendor/pcre2/LICENCE"]
+[host]
+modules = ["erlang"]

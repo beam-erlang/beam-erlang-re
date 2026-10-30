@@ -1,0 +1,332 @@
+{
+  "format": 1,
+  "repository": "https://github.com/erlang/otp",
+  "commit": "550d7b7898706c7822362c42e7b93120c1d1f29a",
+  "files": [
+    {
+      "source": "LICENSE.txt",
+      "destination": "LICENSE.txt",
+      "sha256": "809fa1ed21450f59827d1e9aec720bbc4b687434fa22283c6cb5dd82a47ab9c0"
+    },
+    {
+      "source": "erts/emulator/beam/erl_bif_re.c",
+      "destination": "native/re_nif.c",
+      "sha256": "76a6db9d1680ee760141ac4e888585d781c2cb686e5d7172903e85a2a5d7c45f"
+    },
+    {
+      "source": "erts/emulator/pcre/LICENCE",
+      "destination": "vendor/pcre2/LICENCE",
+      "sha256": "197d8a73ffee0d6b09adba2f9c677b5f5aede24edf89258a68e48248d010d811"
+    },
+    {
+      "source": "erts/emulator/pcre/README.pcre_update.md",
+      "destination": "vendor/pcre2/README.pcre_update.md",
+      "sha256": "1ac283f011f937b4b6ce21bd7719f23baa979797bf98b9f4a15bbbb482f89ded"
+    },
+    {
+      "source": "erts/emulator/pcre/depend.mk",
+      "destination": "vendor/pcre2/depend.mk",
+      "sha256": "bfcd4d62f69b0b5bc5f6f172464a0f3fbf30ceee99dcd96893e60812848d22e0"
+    },
+    {
+      "source": "erts/emulator/pcre/local_config.h",
+      "destination": "vendor/pcre2/local_config.h",
+      "sha256": "8833e4cf0062d2149012caab296759d0b1eba2f73db6c478ef2fb485c2b6b930"
+    },
+    {
+      "source": "erts/emulator/pcre/pcre.mk",
+      "destination": "vendor/pcre2/pcre.mk",
+      "sha256": "8381cfbdf7358a4795db787af925ade9039645065df373e2627b524747d640ba"
+    },
+    {
+      "source": "erts/emulator/pcre/pcre2.h",
+      "destination": "vendor/pcre2/pcre2.h",
+      "sha256": "87083999915e7a83ebada8f45cd87e323ddd4781864a8b78edc35a902f46a94d"
+    },
+    {
+      "source": "erts/emulator/pcre/pcre2_auto_possess.c",
+      "destination": "vendor/pcre2/pcre2_auto_possess.c",
+      "sha256": "f206bb0f59586e1f4da2e1c13ebaaef1e2eb72cac0a1bac01280e1058a917685"
+    },
+    {
+      "source": "erts/emulator/pcre/pcre2_chartables.c",
+      "destination": "vendor/pcre2/pcre2_chartables.c",
+      "sha256": "b2537d24a7c78123f23b3fe32d826207eced962db28ae1a84ff765c23bbd1112"
+    },
+    {
+      "source": "erts/emulator/pcre/pcre2_chkdint.c",
+      "destination": "vendor/pcre2/pcre2_chkdint.c",
+      "sha256": "c5425176571f4870fd81f6b8876a1111438e8aad4ac65ec018b91d2cbb11fdfb"
+    },
+    {
+      "source": "erts/emulator/pcre/pcre2_compile.c",
+      "destination": "vendor/pcre2/pcre2_compile.c",
+      "sha256": "0462424f59f3ca0f75240340fc8885b669ff8fdd06076359912f025a032b8536"
+    },
+    {
+      "source": "erts/emulator/pcre/pcre2_compile.h",
+      "destination": "vendor/pcre2/pcre2_compile.h",
+      "sha256": "4a2c2ad5a6078507a1957cd65d50eb42b9e78fe818429c2a86ad08f7dc060eec"
+    },
+    {
+      "source": "erts/emulator/pcre/pcre2_compile_cgroup.c",
+      "destination": "vendor/pcre2/pcre2_compile_cgroup.c",
+      "sha256": "aef3f26623be1ad5ca79bf497871532d0b811580361c5545624ccf97559e0f93"
+    },
+    {
+      "source": "erts/emulator/pcre/pcre2_compile_class.c",
+      "destination": "vendor/pcre2/pcre2_compile_class.c",
+      "sha256": "ffc9040a34a33ad9e2aa6a7d51d609f331ea75d024ee09fa39e23da006de7d34"
+    },
+    {
+      "source": "erts/emulator/pcre/pcre2_config.c",
+      "destination": "vendor/pcre2/pcre2_config.c",
+      "sha256": "cce69849eb462a8667930d344dca168feaaba46e431f404acc63ff2c546c63a3"
+    },
+    {
+      "source": "erts/emulator/pcre/pcre2_context.c",
+      "destination": "vendor/pcre2/pcre2_context.c",
+      "sha256": "2767979e6c1d624d4c367f637d3ccb841d54ba254bece1f9736071351b450b4a"
+    },
+    {
+      "source": "erts/emulator/pcre/pcre2_error.c",
+      "destination": "vendor/pcre2/pcre2_error.c",
+      "sha256": "a71145068e6015a408b9591e03ec875cf02542c2f717ad611cf74fe1f3b9d09a"
+    },
+    {
+      "source": "erts/emulator/pcre/pcre2_extuni.c",
+      "destination": "vendor/pcre2/pcre2_extuni.c",
+      "sha256": "890f714c3bcdca316ac3f8cea632f535be89dc4964991651e167d57786b8c902"
+    },
+    {
+      "source": "erts/emulator/pcre/pcre2_find_bracket.c",
+      "destination": "vendor/pcre2/pcre2_find_bracket.c",
+      "sha256": "cfa110749dc951c07c23ee1185280e871c3a4614bd9edcb4566a5eda819efa3a"
+    },
+    {
+      "source": "erts/emulator/pcre/pcre2_internal.h",
+      "destination": "vendor/pcre2/pcre2_internal.h",
+      "sha256": "577f7bad1350c73e5d58bb4ec5025d2376c78b9e46704e27dd944f926a32149a"
+    },
+    {
+      "source": "erts/emulator/pcre/pcre2_intmodedep.h",
+      "destination": "vendor/pcre2/pcre2_intmodedep.h",
+      "sha256": "049bc2207f5dfca7ba515478976973c02c350f7fd8c6ccd499484c4525e62711"
+    },
+    {
+      "source": "erts/emulator/pcre/pcre2_match.c",
+      "destination": "vendor/pcre2/pcre2_match.c",
+      "sha256": "434c63dbfc03b9134dc3690a5d5e6e599b39062fa78b5a21bdd082ed136dd69f"
+    },
+    {
+      "source": "erts/emulator/pcre/pcre2_match_data.c",
+      "destination": "vendor/pcre2/pcre2_match_data.c",
+      "sha256": "f175ed124eed155feed89d7c3d96c8b21c788f7b476795f519d15aef567a431e"
+    },
+    {
+      "source": "erts/emulator/pcre/pcre2_newline.c",
+      "destination": "vendor/pcre2/pcre2_newline.c",
+      "sha256": "9cc10e195af1bda2f58470294092d8db5f5648fce80789a3b2c605f37d622787"
+    },
+    {
+      "source": "erts/emulator/pcre/pcre2_ord2utf.c",
+      "destination": "vendor/pcre2/pcre2_ord2utf.c",
+      "sha256": "1e987f64de05b27ffd772218b94899bf3e71f7abf76b3e2ae546a6ef0098885d"
+    },
+    {
+      "source": "erts/emulator/pcre/pcre2_pattern_info.c",
+      "destination": "vendor/pcre2/pcre2_pattern_info.c",
+      "sha256": "c9be11c143df9419c3bc08d3e0a6dd02482c305ae6f133c6f346e531f2962c8c"
+    },
+    {
+      "source": "erts/emulator/pcre/pcre2_script_run.c",
+      "destination": "vendor/pcre2/pcre2_script_run.c",
+      "sha256": "4c2d2ec449ee3faf312ed602c98c72a7d90c059239fbdee913886e2ee48496dd"
+    },
+    {
+      "source": "erts/emulator/pcre/pcre2_serialize.c",
+      "destination": "vendor/pcre2/pcre2_serialize.c",
+      "sha256": "185d6db48a8c257e467a7e663f55cc75673b978ab5fb02d7dd66e75f36515868"
+    },
+    {
+      "source": "erts/emulator/pcre/pcre2_string_utils.c",
+      "destination": "vendor/pcre2/pcre2_string_utils.c",
+      "sha256": "2d3e2513debbc2298e77cca75e6134cae4dad444a3a5d498cc63f635fe34a58e"
+    },
+    {
+      "source": "erts/emulator/pcre/pcre2_study.c",
+      "destination": "vendor/pcre2/pcre2_study.c",
+      "sha256": "8ce64135bd5fd6b2b6be72e462bcb4d6ff17695f9f5699da4c1003933e1b5362"
+    },
+    {
+      "source": "erts/emulator/pcre/pcre2_substring.c",
+      "destination": "vendor/pcre2/pcre2_substring.c",
+      "sha256": "08b82a5e5371ed4028ed4b956aefb781ae0f2c80d7c10182fea95cf446d82474"
+    },
+    {
+      "source": "erts/emulator/pcre/pcre2_tables.c",
+      "destination": "vendor/pcre2/pcre2_tables.c",
+      "sha256": "01e40a1d75b1db0f8d9ec2cf526cd8327a58b15d7ef98b4ed6db7b6ac4f3cbc6"
+    },
+    {
+      "source": "erts/emulator/pcre/pcre2_ucd.c",
+      "destination": "vendor/pcre2/pcre2_ucd.c",
+      "sha256": "11309f89e9e9df0cdbcc774fb25561e44b33dda7ab3bb11cd1cf56e8466fde7f"
+    },
+    {
+      "source": "erts/emulator/pcre/pcre2_ucp.h",
+      "destination": "vendor/pcre2/pcre2_ucp.h",
+      "sha256": "64a694fb4740484ea0cf0715492d6e74ef9f4d27bcde24e47b7998ab81b197fe"
+    },
+    {
+      "source": "erts/emulator/pcre/pcre2_ucptables_inc.h",
+      "destination": "vendor/pcre2/pcre2_ucptables_inc.h",
+      "sha256": "447c53c6e394780857647c67951f11ebe57b76facdbcf6b3219b18ca72010f94"
+    },
+    {
+      "source": "erts/emulator/pcre/pcre2_util.h",
+      "destination": "vendor/pcre2/pcre2_util.h",
+      "sha256": "574b46614e860151fc17e2d14abc7b2235e6f8fc85bfefac9ba22bf9564f3465"
+    },
+    {
+      "source": "erts/emulator/pcre/pcre2_valid_utf.c",
+      "destination": "vendor/pcre2/pcre2_valid_utf.c",
+      "sha256": "36546f46dedf0401a9e75941644787f70b46717427888689aab65b877d9a10af"
+    },
+    {
+      "source": "erts/emulator/pcre/pcre2_xclass.c",
+      "destination": "vendor/pcre2/pcre2_xclass.c",
+      "sha256": "3445a09abcbccc67e0496d11b99c8f517976dfc5e95b6c430bc8369818f34161"
+    },
+    {
+      "source": "erts/emulator/pcre/vendor.info",
+      "destination": "vendor/pcre2/vendor.info",
+      "sha256": "eefd6e5071114b41325a607f29d57ff5062e68c35241b21ec33ce2925448b008"
+    },
+    {
+      "source": "lib/stdlib/doc/src/re.md",
+      "destination": "doc/src/re.md",
+      "sha256": "9647afae53439a8b8f01747839acbc87ded3ce42a06955071038aa9b14ac9537"
+    },
+    {
+      "source": "lib/stdlib/src/re.erl",
+      "destination": "src/re.erl",
+      "sha256": "4f121979023d8e5011d2e026600250dedd284c3a5b909e38688efd34d5b74128"
+    },
+    {
+      "source": "lib/stdlib/test/error_info_lib.erl",
+      "destination": "tests/upstream/error_info_lib.erl",
+      "sha256": "eac1dbbd36801cff352d357ff29e050ab2a599a07b6baccaa0ffa4e5c5e2fcb5"
+    },
+    {
+      "source": "lib/stdlib/test/re_SUITE.erl",
+      "destination": "tests/upstream/re_SUITE.erl",
+      "sha256": "9b4daf209df7ed956babb8dd1b5d65c7b8ac785a952b0af60fce0e5fe629efc2"
+    },
+    {
+      "source": "lib/stdlib/test/re_SUITE_data/mod_testoutput8",
+      "destination": "tests/upstream/re_SUITE_data/mod_testoutput8",
+      "sha256": "7570c359384ca08568c916a7478f91122f4c4dbb6fcee57cdb319c523b58246a"
+    },
+    {
+      "source": "lib/stdlib/test/re_SUITE_data/old_pcre1/mod_testoutput8",
+      "destination": "tests/upstream/re_SUITE_data/old_pcre1/mod_testoutput8",
+      "sha256": "2ac8ce7daf2c92bc4a14829a029776f54c3f0d3c48c6483a2a36b16fdfcc30b0"
+    },
+    {
+      "source": "lib/stdlib/test/re_SUITE_data/old_pcre1/testoutput1",
+      "destination": "tests/upstream/re_SUITE_data/old_pcre1/testoutput1",
+      "sha256": "954925f3320821ab2d9680be4a1b9594a8b5436e8731c815a3422a4471a8ae37"
+    },
+    {
+      "source": "lib/stdlib/test/re_SUITE_data/old_pcre1/testoutput10",
+      "destination": "tests/upstream/re_SUITE_data/old_pcre1/testoutput10",
+      "sha256": "b36885beaf90bac4d25a68ecefc6a82b27c0cbde9382a6ab87ab94aa6ddc9043"
+    },
+    {
+      "source": "lib/stdlib/test/re_SUITE_data/old_pcre1/testoutput2",
+      "destination": "tests/upstream/re_SUITE_data/old_pcre1/testoutput2",
+      "sha256": "96947faf17d849b949b2aaaa46810fb7cfe082d8ddc7ef405ee17defa80ae545"
+    },
+    {
+      "source": "lib/stdlib/test/re_SUITE_data/old_pcre1/testoutput3",
+      "destination": "tests/upstream/re_SUITE_data/old_pcre1/testoutput3",
+      "sha256": "666511032ee1a2ffd3334f311140cb9c47c7099ab9381e2008025431bb59bddd"
+    },
+    {
+      "source": "lib/stdlib/test/re_SUITE_data/old_pcre1/testoutput4",
+      "destination": "tests/upstream/re_SUITE_data/old_pcre1/testoutput4",
+      "sha256": "a821244a0737c58b1997dd61b848202a4be07d8d6e7e69463fb29a1481b9cd1c"
+    },
+    {
+      "source": "lib/stdlib/test/re_SUITE_data/old_pcre1/testoutput5",
+      "destination": "tests/upstream/re_SUITE_data/old_pcre1/testoutput5",
+      "sha256": "ddfa24b2d15e42160d833e885055d9d0e42a4b4d2417c0b5c00a3e3a91014e15"
+    },
+    {
+      "source": "lib/stdlib/test/re_SUITE_data/old_pcre1/testoutput6",
+      "destination": "tests/upstream/re_SUITE_data/old_pcre1/testoutput6",
+      "sha256": "1a59294e66a9895efb1088b10aa09bdc695f9f492b51608229e5912b1902b316"
+    },
+    {
+      "source": "lib/stdlib/test/re_SUITE_data/testoutput1",
+      "destination": "tests/upstream/re_SUITE_data/testoutput1",
+      "sha256": "13fa8b29010df52e0e84b6b234f22be4eadc7b51557179c8b48af71b457923b5"
+    },
+    {
+      "source": "lib/stdlib/test/re_SUITE_data/testoutput10",
+      "destination": "tests/upstream/re_SUITE_data/testoutput10",
+      "sha256": "0420b964e562aebffb11436c11e120b62d14f0b44eee6b8136d211c6e5226b0e"
+    },
+    {
+      "source": "lib/stdlib/test/re_SUITE_data/testoutput2",
+      "destination": "tests/upstream/re_SUITE_data/testoutput2",
+      "sha256": "abef0d86085f749bb49934108524a20e69caafd051c95a14536ba50cc2b48cf8"
+    },
+    {
+      "source": "lib/stdlib/test/re_SUITE_data/testoutput4",
+      "destination": "tests/upstream/re_SUITE_data/testoutput4",
+      "sha256": "01a8ad4f059a705f449592dd0cca53bc7c2d515a0e2d0946e883e6a914a20233"
+    },
+    {
+      "source": "lib/stdlib/test/re_SUITE_data/testoutput5",
+      "destination": "tests/upstream/re_SUITE_data/testoutput5",
+      "sha256": "173a73b030f7404ea5a07c88dae17b705e88e01a3cce1835caf27acd5dcdd18c"
+    },
+    {
+      "source": "lib/stdlib/test/re_SUITE_data/testoutput7",
+      "destination": "tests/upstream/re_SUITE_data/testoutput7",
+      "sha256": "bf6060f7b2083b8f93a1a450630369d583760ae0f017977d9187ecc928550622"
+    },
+    {
+      "source": "lib/stdlib/test/re_SUITE_data/testoutput8",
+      "destination": "tests/upstream/re_SUITE_data/testoutput8",
+      "sha256": "af08ab29a3df1be9fcf5e573e23bebcf75b80bd2c63be385477d46e736f3d382"
+    },
+    {
+      "source": "lib/stdlib/test/re_SUITE_data/testoutput9",
+      "destination": "tests/upstream/re_SUITE_data/testoutput9",
+      "sha256": "da84adf2dedd2ffb24f30f33dd69c2a78bcbcac0947462469e27984f2028729d"
+    },
+    {
+      "source": "lib/stdlib/test/re_testoutput1_replacement_test.erl",
+      "destination": "tests/upstream/re_testoutput1_replacement_test.erl",
+      "sha256": "df8ca341a7dcc6f74779d5aae46a1ce0cdd84db122643b8f736538ea3057b34d"
+    },
+    {
+      "source": "lib/stdlib/test/re_testoutput1_split_test.erl",
+      "destination": "tests/upstream/re_testoutput1_split_test.erl",
+      "sha256": "5af5444a8e3d464434cbdf5b0396cdd45176725f468149b6199b2740349ce22c"
+    },
+    {
+      "source": "lib/stdlib/test/run_old_pcre1_tests.erl",
+      "destination": "tests/upstream/run_old_pcre1_tests.erl",
+      "sha256": "7ed7bc87a0ac6fffe2be54e45a01309a079856dc48ef8f0054554e5b5bbfb52e"
+    },
+    {
+      "source": "lib/stdlib/test/run_pcre_tests.erl",
+      "destination": "tests/upstream/run_pcre_tests.erl",
+      "sha256": "872729750ea32c55e4f9a4a12362fdfeeea465961ab9a7f340c041ddae619650"
+    }
+  ]
+}
