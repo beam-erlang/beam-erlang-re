@@ -20,6 +20,12 @@
 %% %CopyrightEnd%
 %%
 -module(re).
+-ifdef(RE_CANONICAL_PROFILE).
+-define(BEAM_VM, erlang).
+-else.
+-define(BEAM_VM, beam).
+-endif.
+
 -moduledoc({file, "../doc/src/re.md"}).
 -export([grun/3,urun/3,ucompile/2,replace/3,replace/4,split/2,split/3]).
 
@@ -102,6 +108,11 @@ importing is cheap if the importing node is compatible enough to the exporting
 node. If incompatible, as a fallback the `import/1` function will re-compile the regular
 expression from its string format, which is included in
 [`exported()`](`t:exported/0`).
+
+Exported patterns must come from a trusted producer. They include native PCRE
+bytecode; the checksum detects accidental corruption and does not authenticate
+the producer or validate arbitrary bytecode. Use textual patterns across an
+untrusted boundary.
 """.
 -doc(#{since => <<"OTP 28.1">>}).
 -spec import(Exported :: exported()) -> mp().
@@ -1225,7 +1236,7 @@ convert_split_result(List, binary, _Unicode) ->
     %% As it happens, the iodata is actually binaries
     List;
 convert_split_result(List, list, true) ->
-    [unicode:characters_to_list(Element,unicode) || Element <- List];
+    [beam_runtime_unicode:characters_to_list(Element,unicode) || Element <- List];
 convert_split_result(List, list, false) ->
     [binary_to_list(Element) || Element <- List].
 
@@ -1419,14 +1430,14 @@ replace(Subject,RE,Replacement,Options) ->
 		    false ->
 			iolist_to_binary(IoList);
 		    true ->
-			unicode:characters_to_binary(IoList,unicode)
+			beam_runtime_unicode:characters_to_binary(IoList,unicode)
 		end;
 	    list ->
 		case Unicode of
 		    false ->
 			binary_to_list(iolist_to_binary(IoList));
 		    true ->
-			unicode:characters_to_list(IoList,unicode)
+			beam_runtime_unicode:characters_to_list(IoList,unicode)
 		end
 	end
     catch
@@ -1722,7 +1733,7 @@ listify({match,M},Flat,Uni) ->
 		case Uni of
 		    true ->
 			<<_:SPos/binary,Res:SLen/binary,_/binary>> = Flat,
-			unicode:characters_to_list(Res,unicode);
+			beam_runtime_unicode:characters_to_list(Res,unicode);
 		    false ->
 			Start = SPos + 1,
 			End = SPos + SLen,
@@ -1746,7 +1757,7 @@ ulistify({match,M},Flat) ->
 		[];
 	    {SPos,SLen} ->
 		      <<_:SPos/binary,Res:SLen/binary,_/binary>> = Flat,
-		      unicode:characters_to_list(Res,unicode)
+		      beam_runtime_unicode:characters_to_list(Res,unicode)
 	      end || {I,L} <- M ]};
 ulistify(Else,_) ->
     Else.
@@ -1765,7 +1776,7 @@ process_uparams([],Type) ->
 -doc false.
 ucompile(RE,Options) ->
     try
-	re:compile(unicode:characters_to_binary(RE,unicode),Options)
+	re:compile(beam_runtime_unicode:characters_to_binary(RE,unicode),Options)
     catch
 	error:AnyError:Stack ->
             raise_public(compile, [RE,Options], AnyError, Stack)
@@ -1788,14 +1799,14 @@ urun2(Subject0,RE0,Options0) ->
 			    _ ->
 				{Options0,false}
 			end,
-    Subject = unicode:characters_to_binary(Subject0,unicode),
+    Subject = beam_runtime_unicode:characters_to_binary(Subject0,unicode),
     RE = case RE0 of
 	     BinRE when is_binary(BinRE) ->
 		 BinRE;
 	     {re_pattern,_,_,_,_} = ReCompiled ->
 		 ReCompiled;
 	     ListRE ->
-		 unicode:characters_to_binary(ListRE,unicode)
+		 beam_runtime_unicode:characters_to_binary(ListRE,unicode)
 	 end,
     Ret = re:run(Subject,RE,Options),
     case RetType of
@@ -1838,7 +1849,7 @@ do_grun(FlatSubject,Subject,Unicode,CRLF,RE,{Options0,NeedClean}) ->
 	case (catch 
 		  process_parameters(Options0, 0, false, index, NeedClean,RE)) of
 	    badlist ->
-		erlang:error(badarg,[Subject,RE,Options0]);
+		?BEAM_VM:error(badarg,[Subject,RE,Options0]);
 	    CorrectReturn ->
 		CorrectReturn
 	end,
@@ -1991,16 +2002,16 @@ runopt(_) ->
 to_binary(Bin, _IsUnicode) when is_binary(Bin) ->
     Bin;
 to_binary(Data, true) ->
-    unicode:characters_to_binary(Data,unicode);
+    beam_runtime_unicode:characters_to_binary(Data,unicode);
 to_binary(Data, false) ->
     iolist_to_binary(Data).
 
 badarg_with_cause(Args, Cause) ->
-    erlang:error(badarg, Args, [{error_info, #{module => beam_re_errors,
+    ?BEAM_VM:error(badarg, Args, [{error_info, #{module => beam_re_errors,
                                                cause => Cause}}]).
 
 badarg_with_info(Args) ->
-    erlang:error(badarg, Args, [{error_info, #{module => beam_re_errors}}]).
+    ?BEAM_VM:error(badarg, Args, [{error_info, #{module => beam_re_errors}}]).
 
 
 %% Native dispatch retains the upstream Erlang algorithms without allowing a
@@ -2012,9 +2023,9 @@ native_result({beam_re_dispatch, urun, [Subject, RE, Options]}) ->
 native_result({beam_re_dispatch, grun, [Subject, RE, Options]}) ->
     grun(Subject, RE, Options);
 native_result({beam_re_error, badarg, none}) ->
-    erlang:error(badarg, [], [{error_info, #{module => beam_re_errors}}]);
+    ?BEAM_VM:error(badarg, [], [{error_info, #{module => beam_re_errors}}]);
 native_result({beam_re_error, badarg, Cause}) ->
-    erlang:error(badarg, [],
+    ?BEAM_VM:error(badarg, [],
                  [{error_info, #{module => beam_re_errors, cause => Cause}}]);
 native_result(Result) ->
     Result.
@@ -2025,8 +2036,18 @@ raise_public(Function, Args, Reason, Stack) ->
     Info = public_frame_info(Function, Stack),
     ErrorInfo = (stack_error_info(Stack))#{module => beam_re_errors},
     PublicInfo = [{error_info, ErrorInfo} | without_error_info(Info)],
-    erlang:raise(error, Reason,
-                 [{?MODULE, Function, Args, PublicInfo} | outside_re(Stack)]).
+    Caller = case outside_re(Function, Stack) of
+                 [] ->
+                     %% Nested conversions can fill the captured trace with
+                     %% helpers. The enclosing public catch still has its
+                     %% caller on the live stack when it normalizes the error.
+                     {current_stacktrace, Current} =
+                         process_info(self(), current_stacktrace),
+                     outside_re(Function, Current);
+                 Tail -> Tail
+             end,
+    ?BEAM_VM:raise(error, Reason,
+                 [{?MODULE, Function, Args, PublicInfo} | Caller]).
 
 public_frame_info(Function, [{?MODULE, Function, _, Info} | _]) ->
     Info;
@@ -2056,14 +2077,32 @@ without_error_info([Item | Rest]) ->
 without_error_info([]) ->
     [].
 
-outside_re([{?MODULE, _, _, _} | Rest]) -> outside_re(Rest);
-outside_re([{?MODULE, _, _} | Rest]) -> outside_re(Rest);
-outside_re(Stack) -> Stack.
+outside_re(Function, Stack) ->
+    case after_public_frame(Function, Stack) of
+        {ok, Rest} -> drop_re_frames(Rest);
+        none -> outside_first_re(Stack, Stack)
+    end.
+
+%% Conversion primitives can head the original trace. Locate the facade frame
+%% before discarding its helpers, rather than retaining that primitive prefix.
+after_public_frame(Function, [{?MODULE, Function, _, _} | Rest]) -> {ok, Rest};
+after_public_frame(Function, [{?MODULE, Function, _} | Rest]) -> {ok, Rest};
+after_public_frame(Function, [_ | Rest]) -> after_public_frame(Function, Rest);
+after_public_frame(_, []) -> none.
+
+outside_first_re([{?MODULE, _, _, _} | Rest], _) -> drop_re_frames(Rest);
+outside_first_re([{?MODULE, _, _} | Rest], _) -> drop_re_frames(Rest);
+outside_first_re([_ | Rest], Original) -> outside_first_re(Rest, Original);
+outside_first_re([], Original) -> Original.
+
+drop_re_frames([{?MODULE, _, _, _} | Rest]) -> drop_re_frames(Rest);
+drop_re_frames([{?MODULE, _, _} | Rest]) -> drop_re_frames(Rest);
+drop_re_frames(Stack) -> Stack.
 
 reverse_list(List) -> reverse_list(List, []).
 reverse_list([Head | Tail], Acc) -> reverse_list(Tail, [Head | Acc]);
 reverse_list([], Acc) -> Acc;
-reverse_list(_, _) -> erlang:error(badarg).
+reverse_list(_, _) -> ?BEAM_VM:error(badarg).
 
 filter_list(Predicate, [Head | Tail]) ->
     case Predicate(Head) of
@@ -2071,12 +2110,12 @@ filter_list(Predicate, [Head | Tail]) ->
         false -> filter_list(Predicate, Tail)
     end;
 filter_list(_, []) -> [];
-filter_list(_, _) -> erlang:error(badarg).
+filter_list(_, _) -> ?BEAM_VM:error(badarg).
 
 member_list(Value, [Value | _]) -> true;
 member_list(Value, [_ | Tail]) -> member_list(Value, Tail);
 member_list(_, []) -> false;
-member_list(_, _) -> erlang:error(badarg).
+member_list(_, _) -> ?BEAM_VM:error(badarg).
 
 binary_slice(Binary, {Position, Length}) ->
     binary_slice(Binary, Position, Length).
@@ -2089,10 +2128,10 @@ binary_slice(Binary, Position, Length)
   when is_integer(Length), Length < 0 ->
     binary_slice(Binary, Position + Length, -Length);
 binary_slice(_, _, _) ->
-    erlang:error(badarg).
+    ?BEAM_VM:error(badarg).
 
-compile_nif(_, _) -> erlang:nif_error(nif_not_loaded).
-run_nif(_, _, _, _) -> erlang:nif_error(nif_not_loaded).
-inspect_nif(_, _) -> erlang:nif_error(nif_not_loaded).
-import_nif(_) -> erlang:nif_error(nif_not_loaded).
-version_nif() -> erlang:nif_error(nif_not_loaded).
+compile_nif(_, _) -> ?BEAM_VM:nif_error(nif_not_loaded).
+run_nif(_, _, _, _) -> ?BEAM_VM:nif_error(nif_not_loaded).
+inspect_nif(_, _) -> ?BEAM_VM:nif_error(nif_not_loaded).
+import_nif(_) -> ?BEAM_VM:nif_error(nif_not_loaded).
+version_nif() -> ?BEAM_VM:nif_error(nif_not_loaded).

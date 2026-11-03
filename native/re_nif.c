@@ -1,2019 +1,1091 @@
 /*
  * %CopyrightBegin%
- *
  * SPDX-License-Identifier: Apache-2.0
- *
  * Copyright Ericsson AB 2008-2026. All Rights Reserved.
- *
+ * Copyright 2026 Erlangsters.
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
+ * You may obtain a copy at http://www.apache.org/licenses/LICENSE-2.0
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
- *
  * %CopyrightEnd%
- */
-
-#ifdef HAVE_CONFIG_H
-#  include "config.h"
-#endif
-#include "sys.h"
-#include "erl_vm.h"
-#include "global.h"
-#include "erl_process.h"
-#include "error.h"
-#include "bif.h"
-#include "erl_binary.h"
-#include "erl_iolist.h"
-#include "big.h"
-#include "erl_zlib.h"
-#define ERLANG_INTEGRATION 1
-#define PCRE2_STATIC
-//#include "pcre.h"
-#define PCRE2_CODE_UNIT_WIDTH 8
-#include "../pcre/pcre2.h"
-
-#define LOOP_FACTOR 16
-
-static Uint max_loop_limit;
-static Export re_match_trap_export;
-static BIF_RETTYPE re_match_trap(BIF_ALIST_3);
-static Export *grun_trap_exportp = NULL;
-static Export *urun_trap_exportp = NULL;
-static Export *ucompile_trap_exportp = NULL;
-
-static pcre2_general_context* the_general_ctx;
-static pcre2_general_context* the_binary_general_ctx;
-static pcre2_general_context* the_precomp_general_ctx;
-
-static pcre2_compile_context* the_tmp_compile_ctx;
-static pcre2_compile_context* the_precompile_ctx;
-
-static BIF_RETTYPE re_compile(Process* p, Eterm re_arg, Eterm opts_arg, bool is_import);
-static BIF_RETTYPE re_run(Process *p, Eterm arg1, Eterm arg2, Eterm arg3, bool first);
-
-static void *our_pcre2_malloc(size_t size, void* null)
-{
-    const ErtsAlcType_t type = erts_initialized ? ERTS_ALC_T_RE_SHORTLIVED
-                                                : ERTS_ALC_T_RE_INIT;
-    return erts_alloc(type, size);
-}
-
-static void our_pcre2_free(void *ptr, void* null)
-{
-    /* Allocations made during initialization are never freed. */
-    erts_free(ERTS_ALC_T_RE_SHORTLIVED, ptr);
-}
-
-erts_tsd_key_t the_binary_malloc_tsd_key;
-
-static void *our_pcre2_binary_malloc(size_t size, void* null)
-{
-    if (erts_initialized) {
-        Binary* bin = erts_bin_nrml_alloc(size);
-
-        /* Use TSD to "return" Binary back to caller.
-         * We assume only one malloc call per pcre2_serialize_encode()
-         */
-        ASSERT(erts_tsd_get(the_binary_malloc_tsd_key) == NULL);
-        erts_tsd_set(the_binary_malloc_tsd_key, bin);
-
-        return &(bin->orig_bytes);
-    }
-    else {
-        /* Allocation of the_binary_general_ctx itself, which is never freed. */
-        return erts_alloc(ERTS_ALC_T_RE_INIT, size);
-    }
-}
-
-static void our_pcre2_binary_free(void *ptr, void* null)
-{
-    ASSERT(!"Dead code. Exported binary should be deallocated by GC.");
-}
-
-/*
- * The magic binary for a pre-compiled regex.
- * Just an indirection to the pcre2_code allocated and managed by PCRE2.
- * The lifetime is the same as the referred pcre2_code.
  *
- * This might look like an unnecessary indirection, but to allocate
- * the pcre2_code as a magic binary would force us to break the PCRE2 API
- * abstraction somehow.
-
- * According to PCRE2 docs compiled pcre2_code's are thread-safe. That is,
- * several schedulers may execute re:run with the same pcre2_code instance
- * without any need for synchronization or to copy it.
+ * Public-native adaptation of OTP's erl_bif_re.c. PCRE's restartable matcher
+ * remains backend-owned; all Erlang terms, continuations and native lifetimes
+ * use the installed public NIF SDK.
  */
-struct regex_magic_indirect {
-    pcre2_code* regex_code;
+#include <erl_nif.h>
+#include <beam/native.h>
+#include <beam/zlib.h>
+#include <stdint.h>
+#include <stdbool.h>
+#include <stddef.h>
+#include <limits.h>
+#include <stdatomic.h>
+#include <stdio.h>
+#include <string.h>
+#ifndef ERLANG_INTEGRATION
+#define ERLANG_INTEGRATION 1
+#endif
+#ifndef PCRE2_STATIC
+#define PCRE2_STATIC
+#endif
+#ifndef PCRE2_CODE_UNIT_WIDTH
+#define PCRE2_CODE_UNIT_WIDTH 8
+#endif
+#include "../vendor/pcre2/pcre2.h"
+/* These are package-owned backend types, used only to bound its otherwise
+ * length-less deserializer before it reads an externally supplied payload. */
+#include "../vendor/pcre2/pcre2_internal.h"
+
+#define RE_LOOP_LIMIT 64000u
+#define RE_STACK_RESERVE (10u * 1024u)
+#define F_COMPILE 1u
+#define F_EXEC 2u
+#define F_UNICODE 4u
+#define F_OFFSET 8u
+#define F_CAPTURE 16u
+#define F_GLOBAL 32u
+#define F_REPORT 64u
+#define F_MATCH_LIMIT 128u
+#define F_DEPTH_LIMIT 256u
+#define F_EXPORT 512u
+
+typedef struct ReLibrary ReLibrary;
+typedef struct {
+    uint32_t compile, newline, bsr, match, flags;
+    int offset;
+    ERL_NIF_TERM capture, type;
+    uint32_t match_limit, depth_limit;
+} Options;
+typedef struct {
+    ReLibrary *lib;
+    pcre2_code *code;
+} Pattern;
+typedef enum { CAP_INDEX, CAP_LIST, CAP_BINARY, CAP_NONE } CaptureType;
+typedef struct {
+    ReLibrary *lib;
+    CaptureType type;
+    int count;                  /* 0=all, -1=all_but_first, positive=vector */
+    size_t capacity;
+    int *indices;               /* -N followed by N duplicate-name alternatives */
+} Capture;
+typedef struct {
+    ReLibrary *lib;
+    Pattern *pattern;
+    ErlNifEnv *owned_env;
+    const unsigned char *subject;
+    size_t length;
+    int original_binary, started, cleaned;
+    unsigned flags;
+    uint32_t match_flags;
+    int offset;
+    pcre2_match_data *data;
+    pcre2_match_context *context;
+    void *restart;
+    Capture capture;
+} Match;
+struct ReLibrary {
+    pcre2_general_context *general;
+    ErlNifResourceType *patterns, *matches;
+    _Atomic size_t bytes, peak_bytes, allocations, patterns_live, matches_live;
+    _Atomic unsigned loop_limit;
+    _Atomic uint64_t yields;
+#ifdef BEAM_RE_TESTING
+    ErlNifMutex *coverage_lock;
+#endif
 };
-
-static int regex_code_destructor(Binary *mbp)
-{
-    struct regex_magic_indirect* indirect = ERTS_MAGIC_BIN_DATA(mbp);
-    pcre2_code_free(indirect->regex_code);
-#ifdef DEBUG
-    indirect->regex_code = NULL;
-#endif
-    return 1;
-}
-
-static void *our_pcre2_precompile_malloc(size_t size, void* null)
-{
-    return erts_alloc(ERTS_ALC_T_RE_PRECOMPILE, size);
-}
-
-static void our_pcre2_precompile_free(void *ptr, void* null)
-{
-    erts_free(ERTS_ALC_T_RE_PRECOMPILE, ptr);
-}
-
-static bool magic_ref_to_pcre2_code(Eterm magic_ref, pcre2_code  **code_p)
-{
-    Binary *bin;
-    struct regex_magic_indirect* indirect;
-
-    if (!is_internal_magic_ref(magic_ref)) {
-        return false;
-    }
-    bin = erts_magic_ref2bin(magic_ref);
-    if (ERTS_MAGIC_BIN_DESTRUCTOR(bin) != regex_code_destructor) {
-        return false;
-    }
-    indirect = (struct regex_magic_indirect*) ERTS_MAGIC_BIN_DATA(bin);
-    ASSERT(indirect->regex_code != NULL);
-
-    *code_p = indirect->regex_code;
-    return true;
-}
-
-
-
-#define ERTS_PCRE_STACK_MARGIN (10*1024)
-#define ERTS_STACK_LIMIT ((char *) erts_get_stacklimit())
-
-static int
-stack_guard_downwards(uint32_t depth, void* null)
-{
-    char *limit = ERTS_STACK_LIMIT;
-    char c;
-
-    ASSERT(limit);
-
-    return erts_check_below_limit(&c, limit + ERTS_PCRE_STACK_MARGIN);
-}
-
-static int
-stack_guard_upwards(uint32_t depth, void* null)
-{
-    char *limit = ERTS_STACK_LIMIT;
-    char c;
-
-    ASSERT(limit);
-
-    return erts_check_above_limit(&c, limit - ERTS_PCRE_STACK_MARGIN);
-}
-
-void erts_init_bif_re(void)
-{
-    char c;
-    int (*stack_guard)(uint32_t, void *);
-
-    /* We use value 0 as newline/bsr option not specified */
-    ERTS_CT_ASSERT(PCRE2_NEWLINE_CR && PCRE2_NEWLINE_LF && PCRE2_NEWLINE_CRLF
-                   && PCRE2_NEWLINE_ANY && PCRE2_NEWLINE_ANYCRLF
-                   && PCRE2_NEWLINE_NUL);
-    ERTS_CT_ASSERT(PCRE2_BSR_ANYCRLF && PCRE2_BSR_UNICODE);
-
-    if (erts_check_if_stack_grows_downwards(&c))
-        stack_guard = stack_guard_downwards;
-    else
-        stack_guard = stack_guard_upwards;
-
-    the_general_ctx = pcre2_general_context_create(our_pcre2_malloc,
-                                                   our_pcre2_free,
-                                                   NULL);
-    the_tmp_compile_ctx = pcre2_compile_context_create(the_general_ctx);
-    pcre2_set_compile_recursion_guard(the_tmp_compile_ctx, stack_guard, NULL);
-
-    the_precomp_general_ctx =
-        pcre2_general_context_create(our_pcre2_precompile_malloc,
-                                     our_pcre2_precompile_free,
-                                     NULL);
-    the_precompile_ctx = pcre2_compile_context_create(the_precomp_general_ctx);
-    pcre2_set_compile_recursion_guard(the_precompile_ctx, stack_guard,
-                                      NULL);
-
-    the_binary_general_ctx =
-        pcre2_general_context_create(our_pcre2_binary_malloc,
-                                     our_pcre2_binary_free,
-                                     NULL);
-    erts_tsd_key_create(&the_binary_malloc_tsd_key, "re_binary_malloc");
-
-    max_loop_limit = CONTEXT_REDS * LOOP_FACTOR;
-    erts_init_trap_export(&re_match_trap_export, am_erlang, am_re_run_trap, 3,
-			  &re_match_trap);
-    grun_trap_exportp =  erts_export_put(am_re,am_grun,3);
-    urun_trap_exportp =  erts_export_put(am_re,am_urun,3);
-    ucompile_trap_exportp =  erts_export_put(am_re,am_ucompile,2);
-
-    return;
-}
-
-Sint erts_re_set_loop_limit(Sint limit) 
-{
-    Sint save = (Sint) max_loop_limit;
-    if (limit <= 0) {
-	max_loop_limit = CONTEXT_REDS * LOOP_FACTOR;
-    } else {
-	max_loop_limit = (Uint) limit;
-    }
-    return save;
-}
-
-/*
- * Deal with plain int's and so on for the library interface
- */
-
-static int term_to_int(Eterm term, int *sp)
-{
-#if defined(ARCH_64)
-
-    if (is_small(term)) {
-	Uint x = signed_val(term);
-	if (x > INT_MAX) {
-	    return 0;
-	}
-	*sp = (int) x;
-	return 1;
-    } 
-    return 0;
-
-#else
-
-    if (is_small(term)) {
-	*sp = signed_val(term);
-	return 1;
-    } else if (is_big(term)) {
-	ErtsDigit* xr = big_v(term);
-	dsize_t xl = big_size(term);
-	int sign = big_sign(term);
-	unsigned uval = 0;
-	int n = 0;
-
-	if (xl*D_EXP > sizeof(unsigned)*8) {
-	    return 0;
-	}
-	while (xl-- > 0) {
-	    uval |= ((unsigned)(*xr++)) << n;
-	    n += D_EXP;
-	}
-	if (sign) {
-	    uval = -uval;
-	    if ((int)uval > 0)
-		return 0;
-	} else {
-	    if ((int)uval < 0)
-		return 0;
-	}
-	*sp = uval;
-	return 1;
-    } else {
-	return 0;
-    }
-
+#ifdef BEAM_RE_TESTING
+/* Independent outstanding counts survive native unload, so a leaked backend
+ * allocation cannot disappear from the acceptance oracle with its context. */
+static _Atomic size_t test_allocations, test_resources, test_bytes, test_peak_bytes;
+static _Atomic size_t test_total_allocations, test_total_allocated_bytes;
+static _Atomic size_t test_compile_entries, test_compile_running;
+static _Atomic unsigned test_compile_hold_ms;
+static _Atomic unsigned test_fail_load_stage;
 #endif
 
-}
-
-static Eterm make_signed_integer(int x, Process *p)
-{
-#if defined(ARCH_64)
-    return make_small(x);
-#else
-    Eterm* hp;
-    if (IS_SSMALL(x))
-	return make_small(x);
-    else {
-	hp = HAlloc(p, BIG_UINT_HEAP_SIZE);
-	if (x >= 0) {
-	    *hp = make_pos_bignum_header(1);
-	} else {
-	    x = -x;
-	    *hp = make_neg_bignum_header(1);
-	}
-	BIG_DIGIT(hp, 0) = x;
-	return make_big(hp);
-    }
+typedef struct {
+    ErlNifEnv *env;
+#ifdef BEAM_RE_TESTING
+    bool guard_entered;
 #endif
-}
+} CompileOperation;
 
-/*
- * Parse option lists
- */
+typedef union {
+    max_align_t alignment;
+    struct { size_t size; ReLibrary *lib; } info;
+} Allocation;
 
-#define PARSE_FLAG_UNIQUE_COMPILE_OPT 1
-#define PARSE_FLAG_UNIQUE_EXEC_OPT 2
-#define PARSE_FLAG_UNICODE 4
-#define PARSE_FLAG_STARTOFFSET 8
-#define PARSE_FLAG_CAPTURE_OPT 16
-#define PARSE_FLAG_GLOBAL 32
-#define PARSE_FLAG_REPORT_ERRORS 64
-#define PARSE_FLAG_MATCH_LIMIT 128
-#define PARSE_FLAG_MATCH_LIMIT_RECURSION 256
-#define PARSE_FLAG_EXPORT 512
+#define ATOMS(X) \
+ X(ok) X(error) X(compile) X(match) X(nomatch) X(badarg) X(badopt) X(none) \
+ X(true) X(false) X(re_pattern) X(re_exported_pattern) X(beam_re_error) \
+ X(beam_re_dispatch) X(ucompile) X(urun) X(grun) X(index) X(list) X(binary) \
+ X(all) X(all_but_first) X(first) X(all_names) X(capture) X(offset) \
+ X(match_limit) X(match_limit_recursion) X(newline) X(cr) X(crlf) X(lf) \
+ X(nul) X(anycrlf) X(any) X(anchored) X(notempty) X(notempty_atstart) \
+ X(notbol) X(noteol) X(no_start_optimize) X(caseless) X(dollar_endonly) \
+ X(dotall) X(extended) X(firstline) X(multiline) X(no_auto_capture) X(dupnames) \
+ X(ungreedy) X(ucp) X(never_utf) X(report_errors) X(unicode) X(global) \
+ X(bsr_anycrlf) X(bsr_unicode) X(export) X(namelist) X(cancelled) X(system_limit)
+#define DECL_ATOM(n) static ERL_NIF_TERM a_##n;
+ATOMS(DECL_ATOM)
+#undef DECL_ATOM
 
-#define CAPSPEC_VALUES 0
-#define CAPSPEC_TYPE 1
-#define CAPSPEC_SIZE 2
-#define CAPSPEC_INIT {0,0}
-
-
-struct parsed_options {
-    uint32_t compile;   // Option arg to pcre2_compile
-    uint32_t newline;   // PCRE2_NEWLINE_*
-    uint32_t bsr;       // PCRE2_BSR_*
-    uint32_t match;     // Option arg to pcre2_match
-    int flags;
-    int startoffset;
-    Eterm capture[CAPSPEC_SIZE];
-    uint32_t match_limit;
-    uint32_t match_limit_recursion;
-};
-
-static bool parse_options(Eterm listp, struct parsed_options* po)
+static void *backend_alloc(size_t size, void *opaque)
 {
-    po->compile  = 0;
-    po->newline = 0;
-    po->bsr = 0;
-    po->match = 0;
-    po->flags = 0;
-    po->startoffset = 0;
-    po->capture[0] = 0;
-    po->capture[1] = 0;
-    ERTS_UNDEF(po->match_limit, 0);
-    ERTS_UNDEF(po->match_limit_recursion, 0);
-
-    for (;is_list(listp); listp = CDR(list_val(listp))) {
-	    Eterm item = CAR(list_val(listp));
-	    if (is_tuple(item)) {
-		Eterm *tp = tuple_val(item);
-		if (arityval(*tp) != 2 || is_not_atom(tp[1])) {
-		    if (arityval(*tp) == 3 && tp[1] == am_capture) {
-                        po->capture[CAPSPEC_VALUES] = tp[2];
-                        po->capture[CAPSPEC_TYPE] = tp[3];
-			po->flags |= (PARSE_FLAG_CAPTURE_OPT |
-			       PARSE_FLAG_UNIQUE_EXEC_OPT);
-                        continue;
-		    } else {
-                        return false;
-                    }
-                }
-		switch(tp[1]) {
-		case am_capture:
-                    po->capture[CAPSPEC_VALUES] = tp[2];
-                    po->capture[CAPSPEC_TYPE] = am_index;
-		    po->flags |= (PARSE_FLAG_CAPTURE_OPT |
-			   PARSE_FLAG_UNIQUE_EXEC_OPT);
-		    break;
-		case am_offset:
-		    { 
-			int tmp;
-			if (!term_to_int(tp[2],&tmp) || tmp < 0) {
-			    return false;
-			}
-                        po->startoffset = tmp;
-		    }
-		    po->flags |= (PARSE_FLAG_UNIQUE_EXEC_OPT|PARSE_FLAG_STARTOFFSET);
-		    break;
-		case am_match_limit:
-		    { 
-			int tmp;
-			if (!term_to_int(tp[2],&tmp) || tmp < 0) {
-			    return false;
-			}
-                        po->match_limit = tmp;
-		    }
-		    po->flags |= (PARSE_FLAG_UNIQUE_EXEC_OPT|PARSE_FLAG_MATCH_LIMIT);
-		    break;
-		case am_match_limit_recursion:
-		    { 
-			int tmp;
-			if (!term_to_int(tp[2],&tmp) || tmp < 0) {
-			    return false;
-			}
-                        po->match_limit_recursion = tmp;
-		    }
-		    po->flags |= (PARSE_FLAG_UNIQUE_EXEC_OPT|
-			   PARSE_FLAG_MATCH_LIMIT_RECURSION);
-		    break;
-		case am_newline:
-		    switch (tp[2]) {
-		    case am_cr: 
-                        po->newline = PCRE2_NEWLINE_CR;
-			break;
-                    case am_crlf:
-                        po->newline = PCRE2_NEWLINE_CRLF;
-			break;
-		    case am_lf: 
-                        po->newline = PCRE2_NEWLINE_LF;
-			break;
-		    case am_nul:
-			 po->newline = PCRE2_NEWLINE_NUL;
-			break;
-		    case am_anycrlf: 
-                        po->newline = PCRE2_NEWLINE_ANYCRLF;
-			break;
-		    case am_any: 
-                        po->newline = PCRE2_NEWLINE_ANY;
-			break;
-		    default:
-			return false;
-			break;
-		    }
-		    break;
-		default:
-		    return false;
-		}
-	    } else {
-		switch(item) {
-		case am_anchored:
-		    po->compile  |= PCRE2_ANCHORED;
-		    po->match |= PCRE2_ANCHORED;
-		    break;
-		case am_notempty:
-		    po->match |= PCRE2_NOTEMPTY;
-		    po->flags |= PARSE_FLAG_UNIQUE_EXEC_OPT;
-		    break;
-		case am_notempty_atstart:
-		    po->match |= PCRE2_NOTEMPTY_ATSTART;
-		    po->flags |= PARSE_FLAG_UNIQUE_EXEC_OPT;
-		    break;
-		case am_notbol:
-		    po->match |= PCRE2_NOTBOL;
-		    po->flags |= PARSE_FLAG_UNIQUE_EXEC_OPT;
-		    break;
-		case am_noteol:
-		    po->match |= PCRE2_NOTEOL;
-		    po->flags |= PARSE_FLAG_UNIQUE_EXEC_OPT;
-		    break;
-		case am_no_start_optimize:
-		    po->compile |= PCRE2_NO_START_OPTIMIZE;
-		    po->flags |= PARSE_FLAG_UNIQUE_COMPILE_OPT;
-		    break;
-		case am_caseless:
-		    po->compile |= PCRE2_CASELESS;
-		    po->flags |= PARSE_FLAG_UNIQUE_COMPILE_OPT;
-		    break;
-		case am_dollar_endonly:
-		    po->compile |= PCRE2_DOLLAR_ENDONLY;
-		    po->flags |= PARSE_FLAG_UNIQUE_COMPILE_OPT;
-		    break;
-		case am_dotall:
-		    po->compile |= PCRE2_DOTALL;
-		    po->flags |= PARSE_FLAG_UNIQUE_COMPILE_OPT;
-		    break;
-		case am_extended:
-		    po->compile |= PCRE2_EXTENDED;
-		    po->flags |= PARSE_FLAG_UNIQUE_COMPILE_OPT;
-		    break;
-		case am_firstline:
-		    po->compile |= PCRE2_FIRSTLINE;
-		    po->flags |= PARSE_FLAG_UNIQUE_COMPILE_OPT;
-		    break;
-		case am_multiline:
-		    po->compile |= PCRE2_MULTILINE;
-		    po->flags |= PARSE_FLAG_UNIQUE_COMPILE_OPT;
-		    break;
-		case am_no_auto_capture:
-		    po->compile |= PCRE2_NO_AUTO_CAPTURE;
-		    po->flags |= PARSE_FLAG_UNIQUE_COMPILE_OPT;
-		    break;
-		case am_dupnames:
-		    po->compile |= PCRE2_DUPNAMES;
-		    po->flags |= PARSE_FLAG_UNIQUE_COMPILE_OPT;
-		    break;
-		case am_ungreedy:
-		    po->compile |= PCRE2_UNGREEDY;
-		    po->flags |= PARSE_FLAG_UNIQUE_COMPILE_OPT;
-		    break;
-		case am_ucp:
-		    po->compile |= PCRE2_UCP;
-		    po->flags |= PARSE_FLAG_UNIQUE_COMPILE_OPT;
-		    break;
-		case am_never_utf:
-		    po->compile |= PCRE2_NEVER_UTF;
-		    po->flags |= PARSE_FLAG_UNIQUE_COMPILE_OPT;
-		    break;
-		case am_report_errors:
-		    po->flags |= (PARSE_FLAG_UNIQUE_EXEC_OPT |
-			   PARSE_FLAG_REPORT_ERRORS);
-		    break;
-		case am_unicode:
-		    po->compile |= PCRE2_UTF;
-		    po->flags |= (PARSE_FLAG_UNIQUE_COMPILE_OPT | PARSE_FLAG_UNICODE);
-		    break;
-		case am_global:
-		    po->flags |= (PARSE_FLAG_UNIQUE_EXEC_OPT | PARSE_FLAG_GLOBAL);
-		    break;
-                case am_bsr_anycrlf:
-                    po->bsr = PCRE2_BSR_ANYCRLF;
-		    break;
-		case am_bsr_unicode: 
-                    po->bsr = PCRE2_BSR_UNICODE;
-		    break;
-                case am_export:
-                    po->flags |= (PARSE_FLAG_EXPORT | PARSE_FLAG_UNIQUE_COMPILE_OPT);
-                    break;
-		default:
-		    return false;
-		}
-	    }
-    }
-    if (is_not_nil(listp)) {
-        return false;
-    }
-    return true;
+    ReLibrary *lib = opaque;
+    Allocation *a;
+    size_t current, peak;
+    if (size > SIZE_MAX - sizeof(*a)) return NULL;
+    a = enif_alloc(sizeof(*a) + size);
+    if (!a) return NULL;
+    a->info.size = size;
+    a->info.lib = lib;
+    current = atomic_fetch_add(&lib->bytes, size) + size;
+    atomic_fetch_add(&lib->allocations, 1);
+    peak = atomic_load(&lib->peak_bytes);
+    while (current > peak && !atomic_compare_exchange_weak(&lib->peak_bytes, &peak, current)) {}
+#ifdef BEAM_RE_TESTING
+    atomic_fetch_add(&test_allocations, 1);
+    atomic_fetch_add(&test_total_allocations, 1);
+    atomic_fetch_add(&test_total_allocated_bytes, size);
+    current = atomic_fetch_add(&test_bytes, size) + size;
+    peak = atomic_load(&test_peak_bytes);
+    while (current > peak && !atomic_compare_exchange_weak(&test_peak_bytes, &peak, current)) {}
+#endif
+    return a + 1;
 }
-
-/*
- * Regex compile helper
- */
-static pcre2_code *compile(const char* expr,
-                           ErlDrvSizeT slen,
-			   const struct parsed_options *opts,
-                           pcre2_compile_context *compile_ctx,
-                           int *errcode,
-                           PCRE2_SIZE *errofset)
+static void backend_free(void *pointer, void *opaque)
 {
-    pcre2_compile_context* ctx;
-    pcre2_code *result;
-
-    if (opts->newline | opts->bsr) {
-        ctx = pcre2_compile_context_copy(compile_ctx);
-        if (opts->newline) {
-            pcre2_set_newline(ctx, opts->newline);
-        }
-        if (opts->bsr) {
-            pcre2_set_bsr(ctx, opts->bsr);
+    Allocation *a;
+    (void)opaque;
+    if (!pointer) return;
+    a = (Allocation *)pointer - 1;
+    atomic_fetch_sub(&a->info.lib->bytes, a->info.size);
+    atomic_fetch_sub(&a->info.lib->allocations, 1);
+#ifdef BEAM_RE_TESTING
+    atomic_fetch_sub(&test_allocations, 1);
+    atomic_fetch_sub(&test_bytes, a->info.size);
+#endif
+    enif_free(a);
+}
+static void *backend_realloc(void *pointer, size_t size, ReLibrary *lib)
+{
+    Allocation *a;
+    size_t previous, current, peak;
+    if (!pointer) return backend_alloc(size, lib);
+    if (size > SIZE_MAX - sizeof(*a)) return NULL;
+    a = (Allocation *)pointer - 1;
+    previous = a->info.size;
+    a = enif_realloc(a, sizeof(*a) + size);
+    if (!a) return NULL;
+    a->info.size = size;
+    if (size >= previous) current = atomic_fetch_add(&lib->bytes, size - previous) + size - previous;
+    else current = atomic_fetch_sub(&lib->bytes, previous - size) - (previous - size);
+    peak = atomic_load(&lib->peak_bytes);
+    while (current > peak && !atomic_compare_exchange_weak(&lib->peak_bytes, &peak, current)) {}
+#ifdef BEAM_RE_TESTING
+    atomic_fetch_add(&test_total_allocations, 1);
+    atomic_fetch_add(&test_total_allocated_bytes, size);
+    if (size >= previous) current = atomic_fetch_add(&test_bytes, size - previous) + size - previous;
+    else current = atomic_fetch_sub(&test_bytes, previous - size) - (previous - size);
+    peak = atomic_load(&test_peak_bytes);
+    while (current > peak && !atomic_compare_exchange_weak(&test_peak_bytes, &peak, current)) {}
+#endif
+    return a + 1;
+}
+static int cancelled(ErlNifEnv *env)
+{
+    return beam_native_stop_requested() || !enif_is_current_process_alive(env);
+}
+static int compile_guard(uint32_t depth, void *opaque)
+{
+    CompileOperation *operation = opaque;
+    ErlNifEnv *env = operation->env;
+    (void)depth;
+#ifdef BEAM_RE_TESTING
+    if (!operation->guard_entered) {
+        unsigned hold = atomic_exchange(&test_compile_hold_ms, 0);
+        operation->guard_entered = true;
+        atomic_fetch_add(&test_compile_entries, 1);
+        if (hold) {
+            /* One bounded dirty-scheduler test barrier. Cancellation remains
+             * live while another process confirms actual native entry. */
+            ErlNifTime until = enif_monotonic_time(ERL_NIF_MSEC) + hold;
+            while (!cancelled(env) && enif_monotonic_time(ERL_NIF_MSEC) < until)
+                atomic_signal_fence(memory_order_seq_cst);
         }
     }
-    else {
-        ctx = compile_ctx;
-    }
-    result = pcre2_compile_8((const PCRE2_UCHAR8 *)expr, slen, opts->compile,
-                             errcode, errofset, ctx);
-    if (ctx != compile_ctx) {
-        pcre2_compile_context_free(ctx);
-    }
+#endif
+    return cancelled(env) || beam_native_stack_has_space(RE_STACK_RESERVE) != 1;
+}
+static ERL_NIF_TERM badarg(ErlNifEnv *env, ERL_NIF_TERM cause)
+{
+    return enif_make_tuple3(env, a_beam_re_error, a_badarg, cause);
+}
+static ERL_NIF_TERM exhausted(ErlNifEnv *env)
+{
+    return enif_raise_exception(env, a_system_limit);
+}
+static ERL_NIF_TERM dispatch(ErlNifEnv *env, ERL_NIF_TERM action,
+                             unsigned count, const ERL_NIF_TERM *arguments)
+{
+    return enif_make_tuple3(env, a_beam_re_dispatch, action,
+                           enif_make_list_from_array(env, arguments, count));
+}
+static ERL_NIF_TERM bytes(ErlNifEnv *env, const void *source, size_t size)
+{
+    ERL_NIF_TERM result;
+    unsigned char *target = enif_make_new_binary(env, size, &result);
+    if (size && !target) return exhausted(env);
+    if (size) memcpy(target, source, size);
     return result;
 }
 
-/*
- * Build Erlang term result from successful compilation
- */
-static Eterm
-build_compile_result(Process *p, pcre2_code *result, byte unicode, bool with_ok)
+static bool parse_options(ErlNifEnv *env, ERL_NIF_TERM list, Options *o)
 {
-    Eterm *hp;
-    Eterm ret;
-    uint32_t capture_count;
-    uint32_t newline;
-    int use_crlf;
-    Binary* magic_bin;
-    Eterm magic_ref;
-    struct regex_magic_indirect* indirect;
-
-    ASSERT(result);
-
-    pcre2_pattern_info(result, PCRE2_INFO_CAPTURECOUNT, &capture_count);
-    pcre2_pattern_info(result, PCRE2_INFO_NEWLINE, &newline);
-    use_crlf = (newline == PCRE2_NEWLINE_ANY ||
-		newline == PCRE2_NEWLINE_CRLF ||
-		newline == PCRE2_NEWLINE_ANYCRLF);
-
-    magic_bin = erts_create_magic_binary(sizeof(struct regex_magic_indirect),
-					 regex_code_destructor);
-    indirect = ERTS_MAGIC_BIN_DATA(magic_bin);
-    indirect->regex_code = result;
-
-    hp = HAlloc(p, ERTS_MAGIC_REF_THING_SIZE + 6 + (with_ok ? 3 : 0));
-    magic_ref = erts_mk_magic_ref(&hp, &MSO(p), magic_bin);
-    ret = TUPLE5(hp, am_re_pattern, make_small(capture_count),
-		 make_small(unicode), make_small(use_crlf), magic_ref);
-    if (with_ok) {
-	hp += 6;
-	ret = TUPLE2(hp,am_ok,ret);
+    ERL_NIF_TERM item, tail;
+    const ERL_NIF_TERM *tuple;
+    int arity, value;
+    memset(o, 0, sizeof(*o));
+    o->capture = a_all;
+    o->type = a_index;
+    while (enif_get_list_cell(env, list, &item, &tail)) {
+        list = tail;
+        if (enif_get_tuple(env, item, &arity, &tuple)) {
+            if ((arity == 2 || arity == 3) && tuple[0] == a_capture) {
+                o->capture = tuple[1];
+                o->type = arity == 3 ? tuple[2] : a_index;
+                o->flags |= F_CAPTURE | F_EXEC;
+            } else if (arity == 2 && (tuple[0] == a_offset || tuple[0] == a_match_limit ||
+                                      tuple[0] == a_match_limit_recursion)) {
+                if (!enif_get_int(env, tuple[1], &value) || value < 0) return false;
+                if (tuple[0] == a_offset) { o->offset = value; o->flags |= F_OFFSET; }
+                else if (tuple[0] == a_match_limit) { o->match_limit = value; o->flags |= F_MATCH_LIMIT; }
+                else { o->depth_limit = value; o->flags |= F_DEPTH_LIMIT; }
+                o->flags |= F_EXEC;
+            } else if (arity == 2 && tuple[0] == a_newline) {
+                if (tuple[1] == a_cr) o->newline = PCRE2_NEWLINE_CR;
+                else if (tuple[1] == a_crlf) o->newline = PCRE2_NEWLINE_CRLF;
+                else if (tuple[1] == a_lf) o->newline = PCRE2_NEWLINE_LF;
+                else if (tuple[1] == a_nul) o->newline = PCRE2_NEWLINE_NUL;
+                else if (tuple[1] == a_anycrlf) o->newline = PCRE2_NEWLINE_ANYCRLF;
+                else if (tuple[1] == a_any) o->newline = PCRE2_NEWLINE_ANY;
+                else return false;
+            } else return false;
+        } else if (item == a_anchored) { o->compile |= PCRE2_ANCHORED; o->match |= PCRE2_ANCHORED; }
+        else if (item == a_notempty) { o->match |= PCRE2_NOTEMPTY; o->flags |= F_EXEC; }
+        else if (item == a_notempty_atstart) { o->match |= PCRE2_NOTEMPTY_ATSTART; o->flags |= F_EXEC; }
+        else if (item == a_notbol) { o->match |= PCRE2_NOTBOL; o->flags |= F_EXEC; }
+        else if (item == a_noteol) { o->match |= PCRE2_NOTEOL; o->flags |= F_EXEC; }
+#define COMPILE_OPTION(name, flag) else if (item == a_##name) { o->compile |= flag; o->flags |= F_COMPILE; }
+        COMPILE_OPTION(no_start_optimize, PCRE2_NO_START_OPTIMIZE)
+        COMPILE_OPTION(caseless, PCRE2_CASELESS)
+        COMPILE_OPTION(dollar_endonly, PCRE2_DOLLAR_ENDONLY)
+        COMPILE_OPTION(dotall, PCRE2_DOTALL)
+        COMPILE_OPTION(extended, PCRE2_EXTENDED)
+        COMPILE_OPTION(firstline, PCRE2_FIRSTLINE)
+        COMPILE_OPTION(multiline, PCRE2_MULTILINE)
+        COMPILE_OPTION(no_auto_capture, PCRE2_NO_AUTO_CAPTURE)
+        COMPILE_OPTION(dupnames, PCRE2_DUPNAMES)
+        COMPILE_OPTION(ungreedy, PCRE2_UNGREEDY)
+        COMPILE_OPTION(ucp, PCRE2_UCP)
+        COMPILE_OPTION(never_utf, PCRE2_NEVER_UTF)
+#undef COMPILE_OPTION
+        else if (item == a_report_errors) o->flags |= F_EXEC | F_REPORT;
+        else if (item == a_unicode) { o->compile |= PCRE2_UTF; o->flags |= F_COMPILE | F_UNICODE; }
+        else if (item == a_global) o->flags |= F_EXEC | F_GLOBAL;
+        else if (item == a_bsr_anycrlf) o->bsr = PCRE2_BSR_ANYCRLF;
+        else if (item == a_bsr_unicode) o->bsr = PCRE2_BSR_UNICODE;
+        else if (item == a_export) o->flags |= F_COMPILE | F_EXPORT;
+        else return false;
     }
-    return ret;
+    return enif_is_empty_list(env, list);
 }
 
-#define EXPORTED_HDR_TITLE_SZ 8
-#define EXPORTED_HDR_CHECKSUM_SZ 4
-#define EXPORTED_HDR_ENCODE_VER_SZ 1
-#define EXPORTED_HDR_UNICODE_SZ 1
-
-#define EXPORTED_HDR_TITLE_OFFS 0
-#define EXPORTED_HDR_CHECKSUM_OFFS    (EXPORTED_HDR_TITLE_OFFS + EXPORTED_HDR_TITLE_SZ)
-#define EXPORTED_HDR_ENCODE_VER_OFFS  (EXPORTED_HDR_CHECKSUM_OFFS + EXPORTED_HDR_CHECKSUM_SZ)
-#define EXPORTED_HDR_UNICODE_OFFS     (EXPORTED_HDR_ENCODE_VER_OFFS + EXPORTED_HDR_ENCODE_VER_SZ)
-#define EXPORTED_HDR_SZ               (EXPORTED_HDR_UNICODE_OFFS + EXPORTED_HDR_UNICODE_SZ)
-
-/*
- * Bump this version if for some reason the encoded binary format need to change
- * while the PCRE version is the same. That is, if we want to force fallback to
- * compilation without even looking at the exported stuff.
- */
-#define EXPORTED_ENCODE_VERSION 1
-
-static uint32_t
-calc_checksum(const byte* encoded, Uint encoded_sz)
+static void pattern_destructor(ErlNifEnv *env, void *object)
 {
-    return crc32(0, encoded, encoded_sz);
-}
-
-/*
- * Build Erlang binary exported result from successful compilation
- */
-static Eterm
-build_compile_export(Process *p, const pcre2_code *result, byte unicode,
-                     Eterm regex_bin, Eterm opts)
-{
-    Eterm *hp, *hp_end;
-    Uint hsz;
-    Eterm ret, encode_bin_term, hdr_bin_term;
-    uint8_t* serialized_bytes;
-    PCRE2_SIZE serialized_size;
-    Binary* bin;
-    int32_t encode_res;
-    byte *hdr;
-    uint32_t chksum;
-
-    ASSERT(result);
-
-#ifdef DEBUG
-    erts_tsd_set(the_binary_malloc_tsd_key, NULL);
+    Pattern *pattern = object;
+    (void)env;
+    if (pattern->code) {
+        pcre2_code_free(pattern->code);
+        pattern->code = NULL;
+        atomic_fetch_sub(&pattern->lib->patterns_live, 1);
+#ifdef BEAM_RE_TESTING
+        atomic_fetch_sub(&test_resources, 1);
 #endif
-    encode_res = pcre2_serialize_encode_8(&result, 1,
-                                          &serialized_bytes, &serialized_size,
-                                          the_binary_general_ctx);
-    ASSERT(encode_res == 1); (void)encode_res;
-
-    bin = erts_tsd_get(the_binary_malloc_tsd_key);
-    ASSERT(bin);
-    ASSERT((char*)serialized_bytes >= bin->orig_bytes);
-    ASSERT((char*)serialized_bytes + serialized_size <= bin->orig_bytes + bin->orig_size);
-
-    hsz = 3 + 6 + ERL_REFC_BITS_SIZE;
-    hp = HAlloc(p, hsz);
-    hp_end = hp + hsz;
-
-    encode_bin_term = erts_wrap_refc_bitstring(&MSO(p).first,
-                                               &MSO(p).overhead,
-                                               &hp,
-                                               bin,
-                                               serialized_bytes,
-                                               0,
-                                               NBITS(serialized_size));
-
-    hdr_bin_term = erts_new_binary(p, EXPORTED_HDR_SZ, &hdr);
-
-    sys_memcpy(hdr + EXPORTED_HDR_TITLE_OFFS, "re-PCRE2", EXPORTED_HDR_TITLE_SZ);
-    put_int8(EXPORTED_ENCODE_VERSION, hdr + EXPORTED_HDR_ENCODE_VER_OFFS);
-    put_int8(unicode, hdr + EXPORTED_HDR_UNICODE_OFFS);
-
-    chksum = calc_checksum(serialized_bytes, serialized_size);
-    put_int32(chksum, hdr + EXPORTED_HDR_CHECKSUM_OFFS);
-
-    ret = TUPLE5(hp, am_re_exported_pattern, hdr_bin_term, regex_bin, opts, encode_bin_term);
-    hp += 6;
-    ret = TUPLE2(hp, am_ok, ret);
-    hp += 3;
-    ASSERT(hp == hp_end); (void)hp_end;
-
-    return ret;
+    }
+}
+static Pattern *get_pattern(ErlNifEnv *env, ERL_NIF_TERM term,
+                            int *capture_count, int *unicode, int *crlf)
+{
+    ReLibrary *lib = enif_priv_data(env);
+    const ERL_NIF_TERM *tuple;
+    Pattern *pattern;
+    int arity;
+    if (!enif_get_tuple(env, term, &arity, &tuple) || arity != 5 || tuple[0] != a_re_pattern ||
+        !enif_get_int(env, tuple[1], capture_count) || *capture_count < 0 ||
+        !enif_get_int(env, tuple[2], unicode) || !enif_get_int(env, tuple[3], crlf) ||
+        !enif_get_resource(env, tuple[4], lib->patterns, (void **)&pattern) || !pattern->code)
+        return NULL;
+    return pattern;
+}
+static ERL_NIF_TERM compiled(ErlNifEnv *env, ReLibrary *lib, pcre2_code *code,
+                             unsigned unicode)
+{
+    Pattern *pattern;
+    uint32_t count, newline;
+    ERL_NIF_TERM reference;
+    pcre2_pattern_info(code, PCRE2_INFO_CAPTURECOUNT, &count);
+    pcre2_pattern_info(code, PCRE2_INFO_NEWLINE, &newline);
+    pattern = enif_alloc_resource(lib->patterns, sizeof(*pattern));
+    if (!pattern) { pcre2_code_free(code); return exhausted(env); }
+    pattern->lib = lib;
+    pattern->code = code;
+    atomic_fetch_add(&lib->patterns_live, 1);
+#ifdef BEAM_RE_TESTING
+    atomic_fetch_add(&test_resources, 1);
+#endif
+    reference = enif_make_resource(env, pattern);
+    enif_release_resource(pattern);
+    return enif_make_tuple5(env, a_re_pattern, enif_make_uint(env, count),
+                           enif_make_uint(env, unicode),
+                           enif_make_int(env, newline == PCRE2_NEWLINE_ANY ||
+                            newline == PCRE2_NEWLINE_CRLF || newline == PCRE2_NEWLINE_ANYCRLF), reference);
+}
+static pcre2_code *compile_code(ErlNifEnv *env, ReLibrary *lib,
+                                const ErlNifBinary *expression, const Options *o,
+                                int *error, PCRE2_SIZE *offset)
+{
+    pcre2_compile_context *context;
+    pcre2_code *code;
+    CompileOperation operation = { .env = env };
+    context = pcre2_compile_context_create(lib->general);
+    if (!context) { *error = PCRE2_ERROR_NOMEMORY; return NULL; }
+    pcre2_set_compile_recursion_guard(context, compile_guard, &operation);
+    if (o->newline) pcre2_set_newline(context, o->newline);
+    if (o->bsr) pcre2_set_bsr(context, o->bsr);
+    static const unsigned char empty_expression[1] = {0};
+#ifdef BEAM_RE_TESTING
+    atomic_fetch_add(&test_compile_running, 1);
+#endif
+    code = pcre2_compile(expression->data ? expression->data : empty_expression,
+                         expression->size, o->compile,
+                         error, offset, context);
+#ifdef BEAM_RE_TESTING
+    atomic_fetch_sub(&test_compile_running, 1);
+#endif
+    pcre2_compile_context_free(context);
+    if (cancelled(env)) { pcre2_code_free(code); return NULL; }
+    return code;
+}
+static ERL_NIF_TERM compile_error(ErlNifEnv *env, int error, PCRE2_SIZE offset,
+                                  bool run)
+{
+    unsigned char message[120];
+    ERL_NIF_TERM detail;
+    int rc = pcre2_get_error_message(error, message, sizeof(message));
+    if (rc < 0) snprintf((char *)message, sizeof(message), "Unknown error (%d)", error);
+    detail = enif_make_tuple2(env, enif_make_string(env, (const char *)message, ERL_NIF_LATIN1),
+                             enif_make_uint64(env, offset));
+    if (run) detail = enif_make_tuple2(env, a_compile, detail);
+    return enif_make_tuple2(env, a_error, detail);
+}
+static void put32(unsigned char *p, uint32_t n)
+{
+    p[0] = n >> 24; p[1] = n >> 16; p[2] = n >> 8; p[3] = n;
+}
+static uint32_t get32(const unsigned char *p)
+{
+    return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) | p[3];
+}
+static ERL_NIF_TERM export_code(ErlNifEnv *env, ReLibrary *lib, pcre2_code *code,
+                                unsigned unicode, ERL_NIF_TERM original,
+                                ERL_NIF_TERM options)
+{
+    uint8_t *encoded;
+    PCRE2_SIZE size;
+    unsigned char header[14];
+    ErlNifBinary expression;
+    ERL_NIF_TERM result, encoded_term;
+    int rc = pcre2_serialize_encode((const pcre2_code **)&code, 1, &encoded, &size, lib->general);
+    if (rc != 1) return exhausted(env);
+    if (cancelled(env)) { pcre2_serialize_free(encoded); return enif_raise_exception(env, a_cancelled); }
+    memcpy(header, "re-PCRE2", 8);
+    put32(header + 8, (uint32_t)beam_zlib_crc32_z(0, encoded, size));
+    header[12] = 1; header[13] = unicode;
+    encoded_term = bytes(env, encoded, size);
+    pcre2_serialize_free(encoded);
+    if (!enif_inspect_iolist_as_binary(env, original, &expression)) return badarg(env, a_none);
+    result = enif_make_tuple5(env, a_re_exported_pattern, bytes(env, header, sizeof(header)),
+                              bytes(env, expression.data, expression.size), options, encoded_term);
+    return enif_make_tuple2(env, a_ok, result);
+}
+static ERL_NIF_TERM compile_nif(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[])
+{
+    ReLibrary *lib = enif_priv_data(env);
+    Options options;
+    ErlNifBinary expression;
+    pcre2_code *code;
+    PCRE2_SIZE offset = 0;
+    int error = 0;
+    ERL_NIF_TERM result;
+    (void)argc;
+    if (cancelled(env)) return enif_raise_exception(env, a_cancelled);
+    if (!parse_options(env, argv[1], &options) || options.flags & F_EXEC) return badarg(env, a_badopt);
+    if ((options.flags & F_UNICODE) && !enif_is_binary(env, argv[0]))
+        return dispatch(env, a_ucompile, 2, argv);
+    if (!enif_inspect_iolist_as_binary(env, argv[0], &expression)) return badarg(env, a_none);
+    code = compile_code(env, lib, &expression, &options, &error, &offset);
+    if (cancelled(env)) { pcre2_code_free(code); return enif_raise_exception(env, a_cancelled); }
+    if (!code) return compile_error(env, error, offset, false);
+    if (options.flags & F_EXPORT) {
+        result = export_code(env, lib, code, !!(options.flags & F_UNICODE), argv[0], argv[1]);
+        pcre2_code_free(code);
+        return result;
+    }
+    result = compiled(env, lib, code, !!(options.flags & F_UNICODE));
+    if (enif_is_exception(env, result)) return result;
+    return enif_make_tuple2(env, a_ok, result);
 }
 
-BIF_RETTYPE
-re_import_1(BIF_ALIST_1)
+/* Bound the length-less decoder and the name metadata used by package helpers.
+ * This remains PCRE2's trusted bytecode cache, not a bytecode verifier. A version
+ * or architecture mismatch still takes the pinned source-recompile path. */
+static int decode_code(ReLibrary *lib, const ErlNifBinary *encoded, pcre2_code **code)
 {
-    Eterm* tpl;
-    pcre2_code *regex_code;
-    int32_t decode_ret;
-    uint32_t chksum;
-    const byte* hdr;
-    Uint hdr_sz;
-    const byte *hdr_tmp_alloc = NULL;
-    const byte *encoded_tmp_alloc = NULL;
-    byte enc_ver;
-    byte unicode;
-
-    ERTS_UNDEF(regex_code, NULL);
-    ERTS_UNDEF(unicode, 0);
-
-    // {re_exported_pattern, HeaderBin, OrigBin, OrigOpts, EncodedBin}
-
-    if (!is_tuple_arity(BIF_ARG_1, 5)) {
-        goto badarg;
-    }
-    tpl = tuple_val(BIF_ARG_1);
-    if (tpl[1] != am_re_exported_pattern) {
-        goto badarg;
-    }
-
-    hdr = erts_get_aligned_binary_bytes(tpl[2], &hdr_sz, &hdr_tmp_alloc);
-    if (!hdr || hdr_sz < EXPORTED_HDR_SZ
-        || sys_memcmp(hdr, "re-PCRE2", EXPORTED_HDR_TITLE_SZ) != 0) {
-        goto badarg;
-    }
-    enc_ver = get_int8(hdr + EXPORTED_HDR_ENCODE_VER_OFFS);
-    if (enc_ver == EXPORTED_ENCODE_VERSION) {
-        const byte *encoded;
-        Uint encoded_sz;
-
-        /*
-         * Allow header to contain more unknow data that we ignore.
-         * Could be new optional features (such as checksum over fallback)
-         * that was added while being forward compatible.
-         */
-        /*if (hdr_sz != EXPORTED_HDR_SZ) {
-            goto badarg;
-        }*/
-
-        encoded = erts_get_aligned_binary_bytes(tpl[5], &encoded_sz,
-                                                &encoded_tmp_alloc);
-        if (!encoded) {
-            goto badarg;
+    pcre2_serialized_data header;
+    pcre2_real_code block;
+    size_t prefix = sizeof(header) + TABLES_LENGTH;
+    unsigned char *aligned;
+    int rc;
+    if (encoded->size < sizeof(header)) return PCRE2_ERROR_BADSERIALIZEDDATA;
+    memcpy(&header, encoded->data, sizeof(header));
+    if (header.magic != 0x50523253u) return PCRE2_ERROR_BADMAGIC;
+    if (header.version != ((PCRE2_MAJOR) | ((PCRE2_MINOR) << 16)) ||
+        header.config != (sizeof(PCRE2_UCHAR) | (sizeof(void *) << 8) | (sizeof(PCRE2_SIZE) << 16)))
+        return PCRE2_ERROR_BADMODE;
+    if (header.number_of_codes <= 0 || encoded->size < prefix ||
+        encoded->size - prefix < sizeof(block)) return PCRE2_ERROR_BADSERIALIZEDDATA;
+    memcpy(&block, encoded->data + prefix, sizeof(block));
+    if (block.blocksize <= sizeof(block) || block.blocksize > encoded->size - prefix ||
+        block.magic_number != MAGIC_NUMBER || block.name_count > MAX_NAME_COUNT ||
+        block.name_entry_size > MAX_NAME_SIZE + IMM2_SIZE + 1 ||
+        (block.flags & PCRE2_MODE_MASK) != PCRE2_MODE8 ||
+        block.code_start < sizeof(block) || block.code_start >= block.blocksize)
+        return PCRE2_ERROR_BADSERIALIZEDDATA;
+    if (block.name_count) {
+        size_t available = block.code_start - sizeof(block);
+        if (block.name_entry_size < IMM2_SIZE + 1 ||
+            block.name_count > available / block.name_entry_size)
+            return PCRE2_ERROR_BADSERIALIZEDDATA;
+        for (size_t i = 0; i < block.name_count; ++i) {
+            const unsigned char *entry = encoded->data + prefix + sizeof(block) +
+                                          i * block.name_entry_size;
+            unsigned group = ((unsigned)entry[0] << 8) | entry[1];
+            if (!group || group > block.top_bracket ||
+                !memchr(entry + IMM2_SIZE, 0, block.name_entry_size - IMM2_SIZE))
+                return PCRE2_ERROR_BADSERIALIZEDDATA;
         }
-
-        chksum = get_uint32(hdr + EXPORTED_HDR_CHECKSUM_OFFS);
-        if (chksum != calc_checksum(encoded, encoded_sz)) {
-            goto badarg;
-        }
-        unicode = get_int8(hdr + EXPORTED_HDR_UNICODE_OFFS);
-
-        decode_ret = pcre2_serialize_decode_8(&regex_code, 1,
-                                              encoded,
-                                              the_precomp_general_ctx);
     }
-    else {
-        /*
-         * Incorrect export encode format.
-         * Don't even look at tpl[5] and instead act as if the decode failed
-         * and fallback to compile regex below.
-         */
-        decode_ret = PCRE2_ERROR_BADMODE;
-    }
-
-    erts_free_aligned_binary_bytes(hdr_tmp_alloc);
-    hdr_tmp_alloc = NULL;
-    erts_free_aligned_binary_bytes(encoded_tmp_alloc);
-    encoded_tmp_alloc = NULL;
-
-    switch (decode_ret) {
-    case 1: // Ok
-        return build_compile_result(BIF_P, regex_code, unicode, false);
-
-    case PCRE2_ERROR_BADMODE:
-    case PCRE2_ERROR_BADMAGIC:
-        // Wrong architecture or PCRE version, try compile orig regex.
-        if (is_bitstring(tpl[3])) {
-            return re_compile(BIF_P, tpl[3], tpl[4], true);
-        }
-    }
-    ASSERT(decode_ret < 0);
-
-badarg:
-    erts_free_aligned_binary_bytes(hdr_tmp_alloc);
-    erts_free_aligned_binary_bytes(encoded_tmp_alloc);
-    BIF_ERROR(BIF_P, BADARG);
+    aligned = backend_alloc(encoded->size, lib);
+    if (!aligned) return PCRE2_ERROR_NOMEMORY;
+    memcpy(aligned, encoded->data, encoded->size);
+    rc = pcre2_serialize_decode(code, 1, aligned, lib->general);
+    backend_free(aligned, NULL);
+    return rc;
+}
+static ERL_NIF_TERM import_nif(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[])
+{
+    ReLibrary *lib = enif_priv_data(env);
+    const ERL_NIF_TERM *tuple;
+    int arity, rc, error = 0;
+    ErlNifBinary header, encoded, expression;
+    Options options;
+    pcre2_code *code = NULL;
+    PCRE2_SIZE offset = 0;
+    unsigned unicode = 0;
+    (void)argc;
+    if (cancelled(env)) return enif_raise_exception(env, a_cancelled);
+    if (!enif_get_tuple(env, argv[0], &arity, &tuple) || arity != 5 ||
+        tuple[0] != a_re_exported_pattern || !enif_inspect_binary(env, tuple[1], &header) ||
+        header.size < 14 || memcmp(header.data, "re-PCRE2", 8)) return badarg(env, a_none);
+    if (header.data[12] == 1) {
+        if (!enif_inspect_binary(env, tuple[4], &encoded) ||
+            get32(header.data + 8) != (uint32_t)beam_zlib_crc32_z(0, encoded.data, encoded.size))
+            return badarg(env, a_none);
+        unicode = header.data[13];
+        rc = decode_code(lib, &encoded, &code);
+    } else rc = PCRE2_ERROR_BADMODE;
+    if (cancelled(env)) { pcre2_code_free(code); return enif_raise_exception(env, a_cancelled); }
+    if (rc == 1) return compiled(env, lib, code, unicode);
+    if (rc != PCRE2_ERROR_BADMODE && rc != PCRE2_ERROR_BADMAGIC) return badarg(env, a_none);
+    if (!enif_inspect_binary(env, tuple[2], &expression) ||
+        !parse_options(env, tuple[3], &options) || (options.flags & F_EXEC)) return badarg(env, a_none);
+    code = compile_code(env, lib, &expression, &options, &error, &offset);
+    if (cancelled(env)) { pcre2_code_free(code); return enif_raise_exception(env, a_cancelled); }
+    if (!code) return badarg(env, a_none);
+    return compiled(env, lib, code, !!(options.flags & F_UNICODE));
 }
 
-
-/*
- * Build Erlang term result from FAILED compilation
- */
-static Eterm 
-build_compile_error(Process *p,
-		    int errcode, PCRE2_SIZE errofset,
-		    Eterm extra_err_tag)
+static bool capture_push(Capture *capture, int value)
 {
-    Eterm *hp;
-    Eterm ret;
-    int elen, need;
-    PCRE2_UCHAR8 errstr[120];
-
-    /* Return {error, {Code, String, Offset}} */
-    if (pcre2_get_error_message(errcode, errstr, sizeof(errstr))
-	== PCRE2_ERROR_BADDATA) {
-	erts_snprintf((char*)errstr, sizeof(errstr), "Unknown error (%d)", errcode);
+    int *indices;
+    size_t capacity;
+    if (capture->count == INT_MAX) return false;
+    if ((size_t)capture->count == capture->capacity) {
+        if (capture->capacity > SIZE_MAX / 2) return false;
+        capacity = capture->capacity ? capture->capacity * 2 : 8;
+        if (capacity > SIZE_MAX / sizeof(int)) return false;
+        indices = backend_realloc(capture->indices, capacity * sizeof(int), capture->lib);
+        if (!indices) return false;
+        capture->indices = indices;
+        capture->capacity = capacity;
     }
-    elen = sys_strlen((const char*)errstr);
-    need = 3 /* tuple of 2 */ +
-	3 /* tuple of 2 */ +
-	(2 * elen) /* The error string list */ +
-	((extra_err_tag != NIL) ? 3 : 0);
-    hp = HAlloc(p, need);
-    ret = buf_to_intlist(&hp, (char *) errstr, elen, NIL);
-    ret = TUPLE2(hp, ret, make_small(errofset));
-    hp += 3;
-    if (extra_err_tag != NIL) {
-	/* Return {error, {extra_tag,
-	       {Code, String, Offset}}} instead */
-	ret =  TUPLE2(hp, extra_err_tag, ret);
-	hp += 3;
-    }
-    ret = TUPLE2(hp, am_error, ret);
-    return ret;
+    capture->indices[capture->count++] = value;
+    return true;
 }
-
-
-/*
- * Compile BIFs
- */
-
-BIF_RETTYPE
-re_version_0(BIF_ALIST_0)
+static bool capture_name(Capture *capture, pcre2_code *code, const char *name, bool duplicates)
 {
-    byte version[24];
-    int version_size = pcre2_config(PCRE2_CONFIG_VERSION, version) - 1;
-
-    BIF_RET(erts_new_binary_from_data(BIF_P, version_size, version));
-}
-
-static bool get_iolist_as_bytes(Process* p,
-                                Eterm iolist,
-                                byte **bytes_p,
-                                ErlDrvSizeT *slen_p,
-                                byte** tmp_buf_p,
-                                Eterm* resbin_p)
-{
-    int buffres;
-
-    ASSERT(tmp_buf_p || resbin_p);
-
-    if (is_bitstring(iolist)) {
-        Uint bit_offs, bit_sz;
-
-        ERTS_GET_BITSTRING(iolist, *bytes_p, bit_offs, bit_sz);
-        if (!BIT_OFFSET(bit_offs) && !TAIL_BITS(bit_sz)) {
-            *bytes_p += BYTE_OFFSET(bit_offs);
-            *slen_p = BYTE_SIZE(bit_sz);
-            if (resbin_p) {
-                *resbin_p = iolist;
+    int index;
+    if (duplicates) {
+        PCRE2_SPTR first, last;
+        int size = pcre2_substring_nametable_scan(code, (PCRE2_SPTR)name, &first, &last);
+        if (size == PCRE2_ERROR_NOSUBSTRING) return capture_push(capture, -1);
+        if (size < 0) return false;
+        if (first != last) {
+            int count = (int)((last - first) / size) + 1;
+            if (!capture_push(capture, -count)) return false;
+            while (count--) {
+                if (!capture_push(capture, ((unsigned)first[0] << 8) | first[1])) return false;
+                first += size;
             }
             return true;
         }
+        index = ((unsigned)first[0] << 8) | first[1];
+    } else {
+        index = pcre2_substring_number_from_name(code, (PCRE2_SPTR)name);
+        if (index == PCRE2_ERROR_NOSUBSTRING) index = -1;
+        else if (index < 0) return false;
     }
-
-    if (erts_iolist_size(iolist, slen_p)) {
-        return false;
-    }
-    if (resbin_p) {
-        *resbin_p = erts_new_binary(p, *slen_p, bytes_p);
-    }
-    else {
-        *bytes_p = *tmp_buf_p = erts_alloc(ERTS_ALC_T_RE_TMP_BUF, *slen_p);
-    }
-
-    buffres = erts_iolist_to_buf(iolist, (char *)*bytes_p, *slen_p);
-    ASSERT(buffres >= 0); (void)buffres;
-    return true;
+    return capture_push(capture, index);
 }
-
-static BIF_RETTYPE
-re_compile(Process* p, Eterm re_arg, Eterm opts_arg, bool is_import)
+static bool build_capture(ErlNifEnv *env, const Options *options, pcre2_code *code, Capture *capture)
 {
-    ErlDrvSizeT slen;
-    byte *expr;
-    byte *tmp_expr = NULL;
-    pcre2_code *result;
-    int errcode = 0;
-    PCRE2_SIZE errofset = 0;
-    Eterm ret;
-    byte unicode = 0;
-    bool is_export;
-    struct parsed_options opts;
-    Eterm regex_bin;
-    Eterm* regex_bin_p;
-
-    ERTS_UNDEF(regex_bin, THE_NON_VALUE);
-
-    if (!parse_options(opts_arg, &opts)) {
-    opt_error:
-        p->fvalue = am_badopt;
-	BIF_ERROR(p, BADARG | EXF_HAS_EXT_INFO);
-    }
-
-    if (opts.flags & PARSE_FLAG_UNIQUE_EXEC_OPT) {
-        goto opt_error;
-    }
-
-    unicode = (opts.flags & PARSE_FLAG_UNICODE) ? 1 : 0;
-    is_export = !is_import && opts.flags & PARSE_FLAG_EXPORT;
-
-    if (unicode && !is_bitstring(re_arg)) {
-        BIF_TRAP2(ucompile_trap_exportp, p, re_arg, opts_arg);
-    }
-
-    regex_bin_p = is_export ? &regex_bin : NULL;
-
-    if (!get_iolist_as_bytes(p, re_arg, &expr, &slen, &tmp_expr, regex_bin_p)) {
-        BIF_ERROR(p,BADARG);
-    }
-
-    result = compile((char*)expr, slen, &opts,
-                     (is_export ? the_tmp_compile_ctx : the_precompile_ctx),
-                     &errcode, &errofset);
-
-    if (!result) {
-        if (is_import) {
-            ERTS_BIF_PREP_ERROR(ret, p, BADARG);
+    ERL_NIF_TERM value = options->capture, head, tail;
+    uint32_t flags;
+    bool duplicates;
+    memset(capture, 0, sizeof(*capture));
+    capture->lib = enif_priv_data(env);
+    if (options->type == a_index) capture->type = CAP_INDEX;
+    else if (options->type == a_list) capture->type = CAP_LIST;
+    else if (options->type == a_binary) capture->type = CAP_BINARY;
+    else return false;
+    if (value == a_all) return true;
+    if (value == a_none || enif_is_empty_list(env, value)) { capture->type = CAP_NONE; return true; }
+    if (value == a_all_but_first) { capture->count = -1; return true; }
+    if (value == a_first) return capture_push(capture, 0);
+    if (pcre2_pattern_info(code, PCRE2_INFO_ALLOPTIONS, &flags)) return false;
+    duplicates = !!(flags & PCRE2_DUPNAMES);
+    if (value == a_all_names) {
+        uint32_t count, size;
+        PCRE2_SPTR names, previous = NULL;
+        if (pcre2_pattern_info(code, PCRE2_INFO_NAMECOUNT, &count) ||
+            pcre2_pattern_info(code, PCRE2_INFO_NAMEENTRYSIZE, &size) ||
+            pcre2_pattern_info(code, PCRE2_INFO_NAMETABLE, &names)) return false;
+        if (!count) { capture->type = CAP_NONE; return true; }
+        while (count--) {
+            if (!previous || !duplicates || strcmp((const char *)previous + 2, (const char *)names + 2)) {
+                if (!capture_name(capture, code, (const char *)names + 2, duplicates)) return false;
+            }
+            previous = names;
+            names += size;
         }
-        else {
-            ret = build_compile_error(p, errcode, errofset, NIL);
+        return true;
+    }
+    while (enif_get_list_cell(env, value, &head, &tail)) {
+        int index;
+        value = tail;
+        if (enif_get_int(env, head, &index)) {
+            if (index < 0 || !capture_push(capture, index)) return false;
+        } else {
+            char *name;
+            unsigned length;
+            ErlNifBinary binary;
+            if (enif_is_atom(env, head)) {
+                if (!enif_get_atom_length(env, head, &length, ERL_NIF_UTF8) || length == UINT_MAX) return false;
+                name = backend_alloc((size_t)length + 1, capture->lib);
+                if (!name) return false;
+                if (!enif_get_atom(env, head, name, length + 1, ERL_NIF_UTF8)) { backend_free(name, NULL); return false; }
+            } else {
+                if (!enif_inspect_iolist_as_binary(env, head, &binary) || binary.size == SIZE_MAX) return false;
+                name = backend_alloc(binary.size + 1, capture->lib);
+                if (!name) return false;
+                if (binary.size) memcpy(name, binary.data, binary.size);
+                name[binary.size] = 0;
+            }
+            bool ok = capture_name(capture, code, name, duplicates);
+            backend_free(name, NULL);
+            if (!ok) return false;
         }
     }
-    else if (is_export) {
-        ret = build_compile_export(p, result, unicode, regex_bin, opts_arg);
-        pcre2_code_free(result);
-    }
-    else {
-        ret = build_compile_result(p, result, unicode, !is_import);
-    }
-
-    if (tmp_expr) {
-        erts_free(ERTS_ALC_T_RE_TMP_BUF, tmp_expr);
-    }
-    BIF_RET(ret);
+    return enif_is_empty_list(env, value);
 }
-
-BIF_RETTYPE
-re_compile_2(BIF_ALIST_2)
+static void match_cleanup(Match *match)
 {
-    return re_compile(BIF_P, BIF_ARG_1, BIF_ARG_2, false);
+    if (match->cleaned) return;
+    match->cleaned = 1;
+    if (match->restart && match->data) pcre2_free_restart_data(match->data);
+    match->restart = NULL;
+    pcre2_match_data_free(match->data); match->data = NULL;
+    pcre2_match_context_free(match->context); match->context = NULL;
+    backend_free(match->capture.indices, NULL); match->capture.indices = NULL;
+    if (match->pattern) { enif_release_resource(match->pattern); match->pattern = NULL; }
+    if (match->owned_env) { enif_free_env(match->owned_env); match->owned_env = NULL; }
+    match->subject = NULL;
 }
-
-BIF_RETTYPE
-re_compile_1(BIF_ALIST_1)
+static void match_destructor(ErlNifEnv *env, void *object)
 {
-    return re_compile(BIF_P, BIF_ARG_1, NIL, false);
+    Match *match = object;
+    (void)env;
+    match_cleanup(match);
+    atomic_fetch_sub(&match->lib->matches_live, 1);
+#ifdef BEAM_RE_TESTING
+    atomic_fetch_sub(&test_resources, 1);
+#endif
 }
-
-/*
- * Restart contexts for the re:run bif
- */
-
-/*
- * When erts_pcre_exec is restarted, only the actual extra-structure with
- * it's restart-data need to be kept. The match is then called with
- * watever is saved. The code is pointed out by this and cannot be
- * reallocated or GC'ed, why it's passed along as a off-heap-binary,
- * but not actually passed in the erts_pcre_exec restart calls.
- */
-
-typedef enum { RetIndex, RetString, RetBin, RetNone } ReturnType;
-
-typedef struct _return_info {
-    ReturnType type;
-    int num_spec; /* 0 == all, -1 == all_but first, > 0 specified in vector */
-    int v[1];
-} ReturnInfo;
-
-
-#define RESTART_FLAG_SUBJECT_IN_BINARY 0x1
-#define RESTART_FLAG_REPORT_MATCH_LIMIT 0x2
-
-typedef struct _restart_context {
-    void *restart_data;
-    Uint32 flags;
-    PCRE2_UCHAR8* subject; /* to be able to free it when done */
-    pcre2_code *code_to_free;    // temp compiled regex, NULL if precompiled
-    pcre2_match_data *match_data;
-    pcre2_match_context *match_ctx;
-    PCRE2_SIZE *ovector; /* Keep until done */
-    ReturnInfo *ret_info;
-} RestartContext;
-
-#define RESTART_FLAG_SUBJECT_IN_BINARY 0x1
-#define RESTART_FLAG_REPORT_MATCH_LIMIT 0x2
-
-static void cleanup_restart_context(RestartContext *rc) 
+static ERL_NIF_TERM captured(ErlNifEnv *env, Match *match, ERL_NIF_TERM subject,
+                             int index, int result_count)
 {
-    if (rc->restart_data != NULL) {
-	pcre2_free_restart_data(rc->match_data);
-	rc->restart_data = NULL;
+    PCRE2_SIZE *vector = pcre2_get_ovector_pointer(match->data);
+    PCRE2_SIZE start = PCRE2_UNSET, length = 0;
+    if (index >= 0 && index < result_count) {
+        start = vector[index * 2];
+        if (start != PCRE2_UNSET) length = vector[index * 2 + 1] - start;
     }
-    if (rc->match_data != NULL) {
-        pcre2_match_data_free(rc->match_data);
-        rc->match_data = NULL;
-        rc->ovector = NULL;
+    if (match->capture.type == CAP_INDEX)
+        return enif_make_tuple2(env, start == PCRE2_UNSET ? enif_make_int(env, -1) : enif_make_uint64(env, start),
+                               enif_make_uint64(env, length));
+    if (match->capture.type == CAP_BINARY) {
+        if (match->original_binary && start != PCRE2_UNSET)
+            return enif_make_sub_binary(env, subject, start, length);
+        return bytes(env, start == PCRE2_UNSET ? (const unsigned char *)"" : match->subject + start, length);
     }
-    if (rc->match_ctx != NULL) {
-        pcre2_match_context_free(rc->match_ctx);
-        rc->match_ctx = NULL;
-    }
-    if (rc->subject != NULL && !(rc->flags & RESTART_FLAG_SUBJECT_IN_BINARY)) {
-	erts_free(ERTS_ALC_T_RE_SUBJECT, rc->subject);    
-    }
-    rc->subject = NULL;
-    if (rc->code_to_free != NULL) {
-        pcre2_code_free(rc->code_to_free);
-        rc->code_to_free = NULL;
-    }
-    if (rc->ret_info != NULL) {
-	erts_free(ERTS_ALC_T_RE_SUBJECT, rc->ret_info);
-	rc->ret_info = NULL;
-    }
+    ERL_NIF_TERM result = enif_make_list(env, 0);
+    if (start == PCRE2_UNSET) return result;
+    for (size_t i = length; i > 0; --i)
+        result = enif_make_list_cell(env, enif_make_uint(env, match->subject[start + i - 1]), result);
+    return result;
 }
-
-static int cleanup_restart_context_bin(Binary *bp)
+static ERL_NIF_TERM match_result(ErlNifEnv *env, Match *match, ERL_NIF_TERM subject, int rc)
 {
-    RestartContext *rc = ERTS_MAGIC_BIN_DATA(bp);
-    cleanup_restart_context(rc);
-    return 1;
-}
-
-/*
- * Build the return value for Erlang from result and restart context
- */
-
-static Eterm build_exec_return(Process *p, int rc, RestartContext *restartp, Eterm orig_subject) 
-{
-    Eterm res;
-    Eterm *hp;
+    ERL_NIF_TERM list = enif_make_list(env, 0), result;
+    int count = match->capture.count;
+    PCRE2_SIZE *vector = pcre2_get_ovector_pointer(match->data);
     if (rc <= 0) {
-	if (restartp->flags & RESTART_FLAG_REPORT_MATCH_LIMIT) {
-	    if (rc == PCRE2_ERROR_MATCHLIMIT) {
-		hp = HAlloc(p,3);
-		res = TUPLE2(hp,am_error,am_match_limit);
-	    } else if (rc == PCRE2_ERROR_RECURSIONLIMIT) {
-		hp = HAlloc(p,3);
-		res = TUPLE2(hp,am_error,am_match_limit_recursion);
-	    } else {
-		res = am_nomatch;
-	    }
-	} else {
-	    res = am_nomatch;
-	}
+        if (match->flags & F_REPORT) {
+            if (rc == PCRE2_ERROR_MATCHLIMIT) return enif_make_tuple2(env, a_error, a_match_limit);
+            if (rc == PCRE2_ERROR_DEPTHLIMIT) return enif_make_tuple2(env, a_error, a_match_limit_recursion);
+        }
+        return a_nomatch;
+    }
+    if (match->capture.type == CAP_NONE) return a_match;
+    if (count <= 0) {
+        for (int i = rc - 1; i >= -count; --i)
+            list = enif_make_list_cell(env, captured(env, match, subject, i, rc), list);
     } else {
-	ReturnInfo *ri;
-	ReturnInfo defri;
-
-	if (restartp->ret_info == NULL) {
-            /* OpenBSD 5.8 gcc compiler for some reason creates
-               bad code if the above initialization is done
-               inline with the struct. So don't do that. */
-            defri.type = RetIndex;
-            defri.num_spec = 0;
-            defri.v[0] = 0;
-	    ri = &defri;
-	} else {
-	    ri = restartp->ret_info;
-	}
-
-	if (ri->type == RetNone) {
-	    res = am_match;
-	} else if (ri->type == RetIndex){
-	    Eterm *tmp_vect;
-	    Eterm tpl;
-	    int i;
-	    if (ri->num_spec <= 0) {
-		tmp_vect = erts_alloc(ERTS_ALC_T_RE_TMP_BUF, 
-				      rc * 2 * sizeof(Eterm));
-		for(i = -(ri->num_spec) ;i < rc; ++i) {
-                    if (restartp->ovector[i*2] == PCRE2_UNSET) {
-                        tmp_vect[i*2] = make_small(-1);
-                        tmp_vect[i*2+1] = make_small(0);
-                    } else {
-                        tmp_vect[i*2] = make_signed_integer(restartp->ovector[i * 2], p);
-                        tmp_vect[i*2+1] = make_signed_integer(restartp->ovector[i*2+1]
-                                                              - restartp->ovector[i*2],p);
+        ERL_NIF_TERM *values = backend_alloc((size_t)count * sizeof(*values), match->lib);
+        unsigned n = 0;
+        if (!values) return exhausted(env);
+        for (int i = 0; i < count; ++i) {
+            int index = match->capture.indices[i];
+            if (index < -1) {
+                int end = i - index;
+                index = match->capture.indices[i + 1];
+                for (int j = i + 1; j <= end; ++j) {
+                    int alternative = match->capture.indices[j];
+                    if (alternative >= 0 && alternative < rc && vector[alternative * 2] != PCRE2_UNSET) {
+                        index = alternative;
+                        break;
                     }
-		}
-		hp = HAlloc(p, 3+(3+2)*(rc + ri->num_spec));
-		res = NIL;
-		for(i = rc-1 ;i >= -(ri->num_spec); --i) {
-		    tpl = TUPLE2(hp,tmp_vect[i*2],tmp_vect[i*2+1]);
-		    hp += 3;
-		    res = CONS(hp,tpl,res);
-		    hp += 2;
-		}
-	    } else {
-		int n = 0;
-		int x;
-		tmp_vect = erts_alloc(ERTS_ALC_T_RE_TMP_BUF, 
-				      ri->num_spec * 2 * sizeof(Eterm));
-		for (i = 0; i < ri->num_spec; ++i) {
-		    x = ri->v[i];
-		    if (x < -1) {
-			int n = i-x+1;
-			int j;
-			for (j = i+1; j < ri->num_spec && j < n; ++j) {
-			    if (restartp->ovector[(ri->v[j])*2] != PCRE2_UNSET) {
-				x = ri->v[j];
-				break;
-			    }
-			}
-			i = n-1;
-		    }
-		    if (x < rc && x >= 0) {
-			tmp_vect[n*2] = make_signed_integer(restartp->ovector[x*2],p);
-			tmp_vect[n*2+1] = make_signed_integer(restartp->ovector[x*2+1]-restartp->ovector[x*2],p);
-		    } else {
-			tmp_vect[n*2] = make_small(-1);
-			tmp_vect[n*2+1] = make_small(0);
-		    }
-		    ++n;
-		}
-		hp = HAlloc(p, 3+(3+2)*n);
-		res = NIL;
-		for(i = n-1 ;i >= 0; --i) {
-		    tpl = TUPLE2(hp,tmp_vect[i*2],tmp_vect[i*2+1]);
-		    hp += 3;
-		    res = CONS(hp,tpl,res);
-		    hp += 2;
-		}
-	    }
-	    res = TUPLE2(hp,am_match,res);
-	    erts_free(ERTS_ALC_T_RE_TMP_BUF, tmp_vect);
-	} else {
-	    Eterm *tmp_vect;
-	    int i;
-	    if (ri->num_spec <= 0) {
-		tmp_vect = erts_alloc(ERTS_ALC_T_RE_TMP_BUF, 
-				      rc * sizeof(Eterm));
-		for(i = -(ri->num_spec) ;i < rc; ++i) { /* XXX: Unicode */
-                    PCRE2_UCHAR8* cp;
-		    int len;
-		    if (restartp->ovector[i*2] == PCRE2_UNSET) {
-			cp = restartp->subject;
-			len = 0;
-		    } else {
-			cp = restartp->subject + restartp->ovector[i*2];
-			len = restartp->ovector[i*2+1] - restartp->ovector[i*2];
-		    }
-                if (ri->type == RetBin) { 
-                        if (restartp->flags & RESTART_FLAG_SUBJECT_IN_BINARY) {
-                            /* Optimized - if subject was binary to begin with,
-                             * we can make sub-binaries. */
-                            tmp_vect[i] =
-                                erts_make_sub_binary(p,
-                                                     orig_subject,
-                                                     cp - restartp->subject,
-                                                     len);
-                        } else {
-                            tmp_vect[i] =
-                                erts_new_binary_from_data(p, len, (byte*)cp);
-                        }
-		    } else {
-			Eterm *hp2;
-			hp2 = HAlloc(p,(2*len));
-			tmp_vect[i] = buf_to_intlist(&hp2, (char*)cp, len, NIL);
-		    } 
-		}
-		hp = HAlloc(p, 3+2*(rc + ri->num_spec));
-		res = NIL;
-		for(i = rc-1 ;i >= -(ri->num_spec); --i) {
-		    res = CONS(hp,tmp_vect[i],res);
-		    hp += 2;
-		}
-	    } else {
-		int n = 0;
-		int x;
-		tmp_vect = erts_alloc(ERTS_ALC_T_RE_TMP_BUF, 
-				      ri->num_spec * sizeof(Eterm));
-		for (i = 0; i < ri->num_spec; ++i) {
-		    x = ri->v[i];
-		    if (x < -1) {
-			int n = i-x+1;
-			int j;
-			for (j = i+1; j < ri->num_spec && j < n; ++j) {
-			    if (restartp->ovector[(ri->v[j])*2] != PCRE2_UNSET) {
-				x = ri->v[j];
-				break;
-			    }
-			}
-			i = n-1;
-		    }
-		    if (x < rc && x >= 0) {
-			PCRE2_UCHAR *cp;
-			int len;
-			if (restartp->ovector[x*2] == PCRE2_UNSET) {
-			    cp = restartp->subject;
-			    len = 0;
-			} else {
-			    cp = restartp->subject + restartp->ovector[x*2];
-			    len = restartp->ovector[x*2+1] - restartp->ovector[x*2];
-			}
-                        if (ri->type == RetBin) {
-                            if (restartp->flags & RESTART_FLAG_SUBJECT_IN_BINARY) {
-                                /* Optimized - if subject was binary to begin
-                                 * with, we can make sub-binaries. */
-                                tmp_vect[n] =
-                                    erts_make_sub_binary(p,
-                                                         orig_subject,
-                                                         cp - restartp->subject,
-                                                         len);
-                            } else {
-                                tmp_vect[n] =
-                                    erts_new_binary_from_data(p, len, (byte*)cp);
-                            }
-			} else {
-			    Eterm *hp2;
-			    hp2 = HAlloc(p,(2*len));
-			    tmp_vect[n] = buf_to_intlist(&hp2, (char*)cp, len, NIL);
-			} 
-		    } else {
-                        if (ri->type == RetBin) {
-                            tmp_vect[n] =
-                                erts_new_binary_from_data(p, 0, (byte*)"");
-			} else {
-			    tmp_vect[n] = NIL;
-			} 
-		    }	
-		    ++n;
-		}
-		hp = HAlloc(p, 3+2*n);
-		res = NIL;
-		for(i = n-1 ;i >= 0; --i) {
-		    res = CONS(hp,tmp_vect[i],res);
-		    hp += 2;
-		}
-		
-	    }	    
-	    res = TUPLE2(hp,am_match,res);
-	    erts_free(ERTS_ALC_T_RE_TMP_BUF, tmp_vect);
-	}
+                }
+                i = end;
+            }
+            values[n++] = captured(env, match, subject, index, rc);
+        }
+        list = enif_make_list_from_array(env, values, n);
+        backend_free(values, NULL);
     }
-    return res;
+    result = enif_make_tuple2(env, a_match, list);
+    return result;
 }
-
-/*
- * Extra parsing function, build the ReturnInfo structure from
- * a capture specification in the option list
- */
-
-#define RINFO_SIZ(Num) (sizeof(ReturnInfo) + (sizeof(int) * (Num - 1)))
-#define PICK_INDEX(NameEntry)					        \
-    ((int) ((((unsigned) ((unsigned char *) (NameEntry))[0]) << 8) +	\
-	    ((unsigned) ((unsigned char *) (NameEntry))[1])))
-
-
-static void build_one_capture(pcre2_code  *code, ReturnInfo **ri, int *sallocated, int has_dupnames, char *name)
+static ERL_NIF_TERM match_continue(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[])
 {
-    ReturnInfo *r = (*ri);
-    if (has_dupnames) {
-	/* Build a sequence of positions, starting with -size if
-	   more than one, otherwise just put the index there... */
-	const PCRE2_UCHAR8 *first,*last;
-	int esize = pcre2_substring_nametable_scan(code, (PCRE2_UCHAR8*)name,
-                                                   &first, &last);
-	if (esize == PCRE2_ERROR_NOSUBSTRING) {
-	    r->v[r->num_spec - 1] = -1;
-	} else if(last == first) {
-	    r->v[r->num_spec - 1] = PICK_INDEX(first);
-	} else {
-	    int num = ((last - first) / esize) + 1;
-	    int i;
-	    ASSERT(num > 1);
-	    r->v[r->num_spec - 1] = -num; /* A value less than -1 means
-					       multiple indexes for same name */
-	    for (i = 0; i < num; ++i) {
-		++(r->num_spec);
-		if(r->num_spec > (*sallocated)) {
-		    (*sallocated) += 10;
-		    r = erts_realloc(ERTS_ALC_T_RE_SUBJECT, r, 
-				      RINFO_SIZ((*sallocated)));
-		}
-		r->v[r->num_spec - 1] = PICK_INDEX(first);
-		first += esize;
-	    }
-	}
-    } else {
-	/* Use the faster binary search if no duplicate names are present */  
-        r->v[r->num_spec - 1] = pcre2_substring_number_from_name(code, (PCRE2_UCHAR8*)name);
-	if (r->v[r->num_spec - 1] == PCRE2_ERROR_NOSUBSTRING) {
-	    r->v[r->num_spec - 1] = -1;
-	}
-    }
-    *ri = r;
-}    
-
-static ReturnInfo *
-build_capture(Eterm capture_spec[CAPSPEC_SIZE], pcre2_code  *code)
-{
-    ReturnInfo *ri = erts_alloc(ERTS_ALC_T_RE_SUBJECT, RINFO_SIZ(0));
-    int sallocated = 0;
-    char *tmpb = NULL;
-    int tmpbsiz = 0;
-    Eterm l;
-
-    ri->type = RetIndex;
-    ri->num_spec = 0;
-
-
-    switch(capture_spec[CAPSPEC_TYPE]) {
-    case am_index:
-	ri->type = RetIndex;
-	break;
-    case am_list:
-	ri->type = RetString;
-	break;
-    case am_binary:
-	ri->type = RetBin;
-	break;
-    default:
-	goto error;
-    }
-
-    switch(capture_spec[CAPSPEC_VALUES]) {
-    case am_all:
-	ri->num_spec = 0;
-	break;
-    case am_none:
-    case NIL:
-	ri->num_spec = 0;
-	ri->type = RetNone;
-	break;
-    case am_all_but_first:
-	ri->num_spec = -1;
-	break;
-    case am_first:
-	ri->num_spec = 1;
-	if(ri->num_spec > sallocated) {
-	    sallocated = ri->num_spec;
-	    ri = erts_realloc(ERTS_ALC_T_RE_SUBJECT, ri, RINFO_SIZ(sallocated));
-	}
-	ri->v[ri->num_spec - 1] = 0;
-	break;
-    case am_all_names:
-	{
-	    int rc,i;
-	    uint32_t top;
-	    uint32_t entrysize;
-	    unsigned char *nametable, *last = NULL;
-	    int has_dupnames;
-	    uint32_t options;
-
-	    if (pcre2_pattern_info(code, PCRE2_INFO_ALLOPTIONS, &options) != 0)
-		goto error;
-	    if ((rc = pcre2_pattern_info(code, PCRE2_INFO_NAMECOUNT, &top)) != 0)
-		goto error;
-	    if (top <= 0) {
-		ri->num_spec = 0;
-		ri->type = RetNone;
-		break;
-	    }
-	    if (pcre2_pattern_info(code, PCRE2_INFO_NAMEENTRYSIZE, &entrysize) != 0)
-		goto error;
-	    if (pcre2_pattern_info(code, PCRE2_INFO_NAMETABLE, &nametable) != 0)
-		goto error;
-	    
-	    has_dupnames = ((options & PCRE2_DUPNAMES) != 0);
-
-	    for(i=0;i<top;++i) {
-		if (last == NULL || !has_dupnames || sys_strcmp((char *) last+2,(char *) nametable+2)) {
-		    ASSERT(ri->num_spec >= 0);
-		    ++(ri->num_spec);
-		    if(ri->num_spec > sallocated) {
-			sallocated += 10;
-			ri = erts_realloc(ERTS_ALC_T_RE_SUBJECT, ri, RINFO_SIZ(sallocated));
-		    }
-		    if (has_dupnames) {
-			/* This could be more effective, we actually have 
-			   the names and could fill in the vector
-			   immediately. Now we lookup the name again. */
-			build_one_capture(code,&ri,&sallocated,has_dupnames,(char *) nametable+2);
-		    } else {
-			ri->v[ri->num_spec - 1] = PICK_INDEX(nametable);	
-		    }
-		}
-		last = nametable;
-		nametable += entrysize;
-	    }
-	    break;
-	}
-    default:
-	if (is_list(capture_spec[CAPSPEC_VALUES])) {
-	    for(l=capture_spec[CAPSPEC_VALUES];is_list(l);l = CDR(list_val(l))) {
-		int x;
-		Eterm val = CAR(list_val(l));
-		ASSERT(ri->num_spec >= 0);
-		++(ri->num_spec);
-		if(ri->num_spec > sallocated) {
-		    sallocated += 10;
-		    ri = erts_realloc(ERTS_ALC_T_RE_SUBJECT, ri, RINFO_SIZ(sallocated));
-		}
-		if (term_to_int(val,&x)) {
-		    ri->v[ri->num_spec - 1] = x;
-		} else if (is_atom(val) || is_bitstring(val) || is_list(val)) {
-		    int has_dupnames;
-		    uint32_t options;
-		    if (pcre2_pattern_info(code, PCRE2_INFO_ALLOPTIONS, &options) != 0)
-			goto error;
-		    has_dupnames = ((options & PCRE2_DUPNAMES) != 0);
-		    if (is_atom(val)) {
-			Atom *ap = atom_tab(atom_val(val));
-			if ((ap->len + 1) > tmpbsiz) {
-			    if (!tmpbsiz) {
-				tmpb = erts_alloc(ERTS_ALC_T_RE_TMP_BUF,(tmpbsiz = ap->len + 1));
-			    } else {
-				tmpb = erts_realloc(ERTS_ALC_T_RE_TMP_BUF,tmpb,
-						    (tmpbsiz = ap->len + 1));
-			    }
-			}
-                        ASSERT(tmpb != NULL);
-			sys_memcpy(tmpb,erts_atom_get_name(ap),ap->len);
-			tmpb[ap->len] = '\0';
-		    } else {
-			ErlDrvSizeT slen;
-			int buffres;
-
-			if (erts_iolist_size(val, &slen)) {
-			    goto error;
-			}
-			if ((slen + 1) > tmpbsiz) {
-			    if (!tmpbsiz) {
-				tmpb = erts_alloc(ERTS_ALC_T_RE_TMP_BUF,(tmpbsiz = slen + 1));
-			    } else {
-				tmpb = erts_realloc(ERTS_ALC_T_RE_TMP_BUF,tmpb,
-						    (tmpbsiz = slen + 1));
-			    }
-			}
-                        ASSERT(tmpb != NULL);
-			buffres = erts_iolist_to_buf(val, tmpb, slen);
-			ASSERT(buffres >= 0); (void)buffres;
-			tmpb[slen] = '\0';
-		    }
-		    build_one_capture(code,&ri,&sallocated,has_dupnames,tmpb);
-		} else {
-		    goto error;
-		}
-	    }
-	    if (l != NIL) {
-		goto error;
-	    }
-	} else {
-	    goto error;
-	}
-	break;
-    }
-    
-    if(tmpb != NULL) {
-	erts_free(ERTS_ALC_T_RE_TMP_BUF,tmpb);
-    }
-    return ri;
- error:
-    if(tmpb != NULL) {
-	erts_free(ERTS_ALC_T_RE_TMP_BUF,tmpb);
-    }
-    erts_free(ERTS_ALC_T_RE_SUBJECT, ri);
-    return NULL;
-}    
-
-
-/*
- * The actual re:run/2,3 BIFs
- */
-static BIF_RETTYPE
-re_run(Process *p, Eterm arg1, Eterm arg2, Eterm arg3, bool first)
-{
-    RestartContext restart;
-    pcre2_code  *regex_code;
-    ErlDrvSizeT slength;
-    int ovsize;
-    Eterm *tp;
-    int rc;
-    Eterm res;
-    Sint32 loop_limit;
-    int is_list_cap;
-    struct parsed_options opts;
-    const Sint32 reds_initial = ERTS_BIF_REDS_LEFT(p);
-    Sint32 reds_consumed;
-
-    if (!parse_options(arg3, &opts) || (opts.flags & PARSE_FLAG_EXPORT)) {
-        p->fvalue = am_badopt;
-	BIF_ERROR(p, BADARG | EXF_HAS_EXT_INFO);
-    }
-    if (!first) {
-        /*
-         * 'first' is false when re:grun() previously has called re:internal_run()
-         * with the same subject; i.e., no need to do yet another validation of
-         * the subject regarding utf8 encoding...
-         */
-        opts.match |= PCRE2_NO_UTF_CHECK;
-    }
-    is_list_cap = ((opts.flags & PARSE_FLAG_CAPTURE_OPT) &&
-		   (opts.capture[CAPSPEC_TYPE] == am_list));
-
-    if (!is_tuple_arity(arg2, 5)) {
-        if (!is_bitstring(arg2) && !is_list(arg2) && !is_nil(arg2)) {
-            BIF_ERROR(p,BADARG);
-        }
-        else {
-	    /* Compile from textual regex */
-	    ErlDrvSizeT slen;
-	    byte *expr;
-            byte *tmp_expr = NULL;
-
-	    int errcode = 0;
-	    PCRE2_SIZE errofset = 0;
-	    uint32_t capture_count;
-
-	    if (opts.flags & PARSE_FLAG_UNICODE &&
-		(!is_bitstring(arg2) || !is_bitstring(arg1) ||
-		 (is_list_cap && !(opts.flags & PARSE_FLAG_GLOBAL)))) {
-		BIF_TRAP3(urun_trap_exportp, p, arg1, arg2, arg3);
-	    }
-	    
-            if (!get_iolist_as_bytes(p, arg2, &expr, &slen, &tmp_expr, NULL)) {
-                BIF_ERROR(p,BADARG);
-            }
-
-            regex_code = compile((char*)expr, slen, &opts, the_tmp_compile_ctx,
-                                 &errcode, &errofset);
-            if (tmp_expr) {
-                erts_free(ERTS_ALC_T_RE_TMP_BUF, tmp_expr);
-            }
-
-            if (!regex_code) {
-		/* Compilation error gives badarg except in the compile 
-		   function or if we have PARSE_FLAG_REPORT_ERRORS */
-		if (opts.flags &  PARSE_FLAG_REPORT_ERRORS) {
-		    res = build_compile_error(p, errcode,
-					       errofset, am_compile);
-		    BIF_RET(res);
-		} else {
-		    BIF_ERROR(p,BADARG);
-		}
-	    }
-	    if (opts.flags & PARSE_FLAG_GLOBAL) {
-		Eterm precompiled = 
-		    build_compile_result(p,
-					 regex_code,
-					 (opts.flags &
-					  PARSE_FLAG_UNICODE) ? 1 : 0,
-					 false);
-		Eterm *hp,r;
-		hp = HAlloc(p,4);
-		/* arg2 is in the tuple just to make exceptions right */
-		r = TUPLE3(hp,arg3,
-			   ((opts.flags & PARSE_FLAG_UNIQUE_COMPILE_OPT) ?
-			    am_true : 
-			    am_false), arg2);
-		BIF_TRAP3(grun_trap_exportp, p, arg1, precompiled, r);
-	    }
-
-	    pcre2_pattern_info(regex_code, PCRE2_INFO_CAPTURECOUNT, &capture_count);
-	    ovsize = capture_count + 1;
-	    restart.code_to_free = regex_code;
-        }
-    } else {
-        /* Precompiled regex */
-
-	if (opts.flags & PARSE_FLAG_UNIQUE_COMPILE_OPT) {
-	    BIF_ERROR(p,BADARG);
-	}
-
-	tp = tuple_val(arg2);
-	if (tp[1] != am_re_pattern || is_not_small(tp[2]) || 
-	    is_not_small(tp[3]) || is_not_small(tp[4]) || 
-            !magic_ref_to_pcre2_code(tp[5], &regex_code)) {
-	    BIF_ERROR(p,BADARG);
-	}
-
-	if (unsigned_val(tp[3]) && 
-	    (!is_bitstring(arg1) ||
-	     (is_list_cap && !(opts.flags & PARSE_FLAG_GLOBAL)))) { /* unicode */
-	    BIF_TRAP3(urun_trap_exportp, p, arg1, arg2,
-		      arg3);
-	}
-
-	if (opts.flags & PARSE_FLAG_GLOBAL) {
-	    Eterm *hp,r;
-	    hp = HAlloc(p,3);
-	    r = TUPLE2(hp,arg3,am_false);
-	    BIF_TRAP3(grun_trap_exportp, p, arg1, arg2,
-		      r);
-	}
-
-	ovsize = unsigned_val(tp[2]) + 1;
-
-	if (opts.newline | opts.bsr) {
-            /*
-	     * Old PCRE did support newline and bsr options at both "compile"
-	     * and "match". PCRE2 do only support them to "compile" function.
-             * To be nice we only fail with badarg if (old) user passes
-             * different newline or bsr option to re:run vs re:compile.
-             */
-	    if (opts.newline) {
-		uint32_t newline_compiled;
-		if (pcre2_pattern_info(regex_code, PCRE2_INFO_NEWLINE,
-				       &newline_compiled) != 0
-		    || newline_compiled != opts.newline) {
-		    BIF_ERROR(p, BADARG);
-		}
-	    }
-	    if (opts.bsr) {
-		uint32_t bsr_compiled;
-		if (pcre2_pattern_info(regex_code, PCRE2_INFO_BSR,
-				       &bsr_compiled) != 0
-		    || bsr_compiled != opts.bsr) {
-		    BIF_ERROR(p, BADARG);
-		}
-	    }
-        }
-        restart.code_to_free = NULL;
-    }
-
-    restart.match_data = pcre2_match_data_create(ovsize, the_general_ctx);
-    restart.ovector = pcre2_get_ovector_pointer(restart.match_data);
-
-    loop_limit = MIN(reds_initial * LOOP_FACTOR, max_loop_limit);
-    pcre2_set_loops_left(restart.match_data, loop_limit);
-    restart.restart_data = NULL;
-    pcre2_set_restart_data(restart.match_data, &restart.restart_data);
-    pcre2_set_restart_flags(restart.match_data, 0);
-
-    restart.ret_info = NULL;
-    if (opts.flags & PARSE_FLAG_CAPTURE_OPT) {
-	if ((restart.ret_info = build_capture(opts.capture, regex_code)) == NULL) {
-            pcre2_match_data_free(restart.match_data);
-            pcre2_code_free_8(restart.code_to_free);
-	    BIF_ERROR(p,BADARG);
-	}
-    }
-
-    if (opts.flags & (PARSE_FLAG_MATCH_LIMIT | PARSE_FLAG_MATCH_LIMIT_RECURSION)) {
-        restart.match_ctx = pcre2_match_context_create(the_general_ctx);
-        if (opts.flags & PARSE_FLAG_MATCH_LIMIT) {
-            pcre2_set_match_limit(restart.match_ctx, opts.match_limit);
-        }
-        if (opts.flags & PARSE_FLAG_MATCH_LIMIT_RECURSION) {
-            pcre2_set_depth_limit(restart.match_ctx, opts.match_limit_recursion);
-        }
-    }
+    ReLibrary *lib = enif_priv_data(env);
+    Match *match;
+    unsigned limit = atomic_load(&lib->loop_limit);
+    int rc, remaining;
+    ERL_NIF_TERM result;
+    (void)argc;
+    if (!enif_get_resource(env, argv[1], lib->matches, (void **)&match) || match->cleaned)
+        return badarg(env, a_none);
+    if (cancelled(env)) { match_cleanup(match); return enif_raise_exception(env, a_cancelled); }
+    pcre2_set_loops_left(match->data, (int)limit);
+    pcre2_set_restart_flags(match->data, 0);
+#ifdef BEAM_RE_TESTING
+    enif_mutex_lock(lib->coverage_lock);
+#endif
+    if (match->started) rc = pcre2_match(NULL, NULL, 0, 0, 0, match->data, NULL);
     else {
-        restart.match_ctx = NULL;
+        match->started = 1;
+        rc = pcre2_match(match->pattern->code, match->subject, match->length,
+                         match->offset, match->match_flags, match->data, match->context);
     }
-
-    /* Optimized - if already in binary off heap, keep that and avoid copying,
-     * also binary returns can be sub binaries in that case. */
-    restart.flags = 0;
-    if (is_bitstring(arg1)) {
-        ERTS_DECLARE_DUMMY(Eterm br_flags);
-        ERTS_DECLARE_DUMMY(BinRef *br);
-        Uint offset, size;
-        byte *base;
-
-        ERTS_PIN_BITSTRING(arg1, br_flags, br, base, offset, size);
-
-        /* If this is an unaligned or on-heap binary, we'll make a copy of it
-         * instead. */
-        if (BIT_OFFSET(offset) != 0 || TAIL_BITS(size) != 0 ||
-            size <= ERL_ONHEAP_BITS_LIMIT) {
-            goto handle_iodata;
-        }
-
-        restart.flags |= RESTART_FLAG_SUBJECT_IN_BINARY;
-        restart.subject = &base[BYTE_OFFSET(offset)];
-        slength = BYTE_SIZE(size);
-    } else {
-	int buffres;
-handle_iodata:
-	if (erts_iolist_size(arg1, &slength)) {
-            pcre2_match_data_free(restart.match_data);
-            if (restart.match_ctx) {
-                pcre2_match_context_free(restart.match_ctx);
-            }
-            pcre2_code_free_8(restart.code_to_free);
-	    if (restart.ret_info != NULL) {
-		erts_free(ERTS_ALC_T_RE_SUBJECT, restart.ret_info);
-	    }
-	    BIF_ERROR(p,BADARG);
-	}
-	restart.subject = erts_alloc(ERTS_ALC_T_RE_SUBJECT, slength);
-
-	buffres = erts_iolist_to_buf(arg1, (char*)restart.subject, slength);
-	ASSERT(buffres >= 0); (void)buffres;
+#ifdef BEAM_RE_TESTING
+    enif_mutex_unlock(lib->coverage_lock);
+#endif
+    remaining = pcre2_get_loops_left(match->data);
+    unsigned consumed = remaining >= (int)limit ? 0 : limit - (remaining > 0 ? (unsigned)remaining : 0);
+    unsigned percent = (unsigned)(((uint64_t)consumed * 100 + RE_LOOP_LIMIT - 1) / RE_LOOP_LIMIT);
+    if (percent) enif_consume_timeslice(env, percent > 100 ? 100 : percent);
+    if (cancelled(env)) { match_cleanup(match); return enif_raise_exception(env, a_cancelled); }
+    if (rc == PCRE2_ERROR_LOOP_LIMIT) {
+        atomic_fetch_add(&lib->yields, 1);
+        return enif_schedule_nif(env, "re_match_continue", 0, match_continue, 2, argv);
     }
-
-    if (opts.flags & PARSE_FLAG_REPORT_ERRORS) {
-	restart.flags |= RESTART_FLAG_REPORT_MATCH_LIMIT;
-    }
-
-    rc = pcre2_match_8(regex_code, restart.subject,
-                       slength, opts.startoffset,
-                       opts.match,
-                       restart.match_data,
-                       restart.match_ctx);
-
-    reds_consumed = (loop_limit - pcre2_get_loops_left(restart.match_data)) / LOOP_FACTOR;
-
-    if (rc < 0) {
-        switch (rc) {
-            /* No match... */
-        case PCRE2_ERROR_NOMATCH:
-        case PCRE2_ERROR_MATCHLIMIT:
-        case PCRE2_ERROR_DEPTHLIMIT:
-        case PCRE2_ERROR_HEAPLIMIT:
-            break;
-
-            /* Yield... */
-        case PCRE2_ERROR_LOOP_LIMIT: {
-            /* Trap */
-            Binary *mbp = erts_create_magic_binary(sizeof(RestartContext),
-                                                   cleanup_restart_context_bin);
-            RestartContext *restartp = ERTS_MAGIC_BIN_DATA(mbp);
-            Eterm magic_ref;
-            Eterm *hp;
-            BUMP_REDS(p, reds_consumed);
-            sys_memcpy(restartp,&restart,sizeof(RestartContext));
-            pcre2_set_restart_data(restart.match_data, &restartp->restart_data);
-            ERTS_VBUMP_ALL_REDS(p);
-            hp = HAlloc(p, ERTS_MAGIC_REF_THING_SIZE);
-            magic_ref = erts_mk_magic_ref(&hp, &MSO(p), mbp);
-            BIF_TRAP3(&re_match_trap_export,
-                      p,
-                      arg1,
-                      arg2 /* To avoid GC of precompiled code, XXX: not utilized yet */,
-                      magic_ref);
-        }
-
-            /* Recursive loop detected in pattern... */
-        case PCRE2_ERROR_RECURSELOOP:
-            reds_consumed = CONTEXT_REDS; /* Unknown amount of work done... */
-            break; /* nomatch for backwards compatibility reasons for now... */
-            
-            /* Bad utf8 in subject... */
-        case PCRE2_ERROR_BADUTFOFFSET:
-        case PCRE2_ERROR_UTF8_ERR1:
-        case PCRE2_ERROR_UTF8_ERR2:
-        case PCRE2_ERROR_UTF8_ERR3:
-        case PCRE2_ERROR_UTF8_ERR4:
-        case PCRE2_ERROR_UTF8_ERR5:
-        case PCRE2_ERROR_UTF8_ERR6:
-        case PCRE2_ERROR_UTF8_ERR7:
-        case PCRE2_ERROR_UTF8_ERR8:
-        case PCRE2_ERROR_UTF8_ERR9:
-        case PCRE2_ERROR_UTF8_ERR10:
-        case PCRE2_ERROR_UTF8_ERR11:
-        case PCRE2_ERROR_UTF8_ERR12:
-        case PCRE2_ERROR_UTF8_ERR13:
-        case PCRE2_ERROR_UTF8_ERR14:
-        case PCRE2_ERROR_UTF8_ERR15:
-        case PCRE2_ERROR_UTF8_ERR16:
-        case PCRE2_ERROR_UTF8_ERR17:
-        case PCRE2_ERROR_UTF8_ERR18:
-        case PCRE2_ERROR_UTF8_ERR19:
-        case PCRE2_ERROR_UTF8_ERR20:
-        case PCRE2_ERROR_UTF8_ERR21:
-            BUMP_ALL_REDS(p); /* Unknown amount of work done... */
-            ERTS_FALLTHROUGH();
-
-        case PCRE2_ERROR_BADOFFSET:
-            /* Bad pre-compiled regexp... */
-        case PCRE2_ERROR_BADMAGIC:
-        case PCRE2_ERROR_BADMODE:
-            cleanup_restart_context(&restart);
-            BIF_ERROR(p, BADARG);
-
-        default:
-            /* Something unexpected happened... */
-            ASSERT(! "Unexpected pcre2_match() result");
-            cleanup_restart_context(&restart);
-            BIF_ERROR(p, EXC_INTERNAL_ERROR);
-        }
-    }
-    
-    BUMP_REDS(p, reds_consumed);
-
-    res = build_exec_return(p, rc, &restart, arg1);
- 
-    cleanup_restart_context(&restart);
-
-    BIF_RET(res);
+    if (rc == PCRE2_ERROR_BADUTFOFFSET || rc == PCRE2_ERROR_BADOFFSET ||
+        rc == PCRE2_ERROR_BADMAGIC || rc == PCRE2_ERROR_BADMODE ||
+        (rc <= PCRE2_ERROR_UTF8_ERR1 && rc >= PCRE2_ERROR_UTF8_ERR21))
+        result = badarg(env, a_none);
+    else if (rc >= 0 || rc == PCRE2_ERROR_NOMATCH || rc == PCRE2_ERROR_MATCHLIMIT ||
+             rc == PCRE2_ERROR_DEPTHLIMIT || rc == PCRE2_ERROR_HEAPLIMIT || rc == PCRE2_ERROR_RECURSELOOP)
+        result = match_result(env, match, argv[0], rc);
+    else result = enif_raise_exception(env, enif_make_atom(env, "internal_error"));
+    match_cleanup(match);
+    return result;
 }
 
-BIF_RETTYPE
-re_internal_run_4(BIF_ALIST_4)
+/* Both direct compiled calls and dirty textual compilation enter matching on a
+ * regular scheduler. The original arguments remain available for the Erlang
+ * Unicode/global helpers and their public error presentation. */
+static ERL_NIF_TERM run_compiled(ErlNifEnv *env, const ERL_NIF_TERM argv[],
+                                ERL_NIF_TERM pattern_term, const Options *parsed,
+                                bool textual)
 {
-    bool first;
-    if (BIF_ARG_4 == am_false)
-        first = false;
-    else if (BIF_ARG_4 == am_true)
-        first = true;
-    else
-        BIF_ERROR(BIF_P,BADARG);
-    return re_run(BIF_P,BIF_ARG_1, BIF_ARG_2, BIF_ARG_3, first);
+    ReLibrary *lib = enif_priv_data(env);
+    const Options options = *parsed;
+    Pattern *pattern;
+    Match *match;
+    int capture_count, unicode, crlf;
+    bool first, list_capture;
+    ERL_NIF_TERM dispatch_args[3], resource, next[2];
+    ErlNifBinary subject;
+    if (cancelled(env)) return enif_raise_exception(env, a_cancelled);
+    if (argv[3] == a_true) first = true;
+    else if (argv[3] == a_false) first = false;
+    else return badarg(env, a_none);
+    list_capture = (options.flags & F_CAPTURE) && options.type == a_list;
+    pattern = get_pattern(env, pattern_term, &capture_count, &unicode, &crlf);
+    if (!pattern) return badarg(env, a_none);
+    if (unicode && (!enif_is_binary(env, argv[0]) || (list_capture && !(options.flags & F_GLOBAL))))
+        return dispatch(env, a_urun, 3, argv);
+    if (options.flags & F_GLOBAL) {
+        dispatch_args[0] = argv[0];
+        dispatch_args[1] = pattern_term;
+        dispatch_args[2] = textual ? enif_make_tuple3(env, argv[2],
+            options.flags & F_COMPILE ? a_true : a_false, argv[1]) :
+            enif_make_tuple2(env, argv[2], a_false);
+        return dispatch(env, a_grun, 3, dispatch_args);
+    }
+    if (!textual) {
+        uint32_t compiled_value;
+        if (options.newline && (pcre2_pattern_info(pattern->code, PCRE2_INFO_NEWLINE, &compiled_value) ||
+                               compiled_value != options.newline)) return badarg(env, a_none);
+        if (options.bsr && (pcre2_pattern_info(pattern->code, PCRE2_INFO_BSR, &compiled_value) ||
+                           compiled_value != options.bsr)) return badarg(env, a_none);
+    }
+    match = enif_alloc_resource(lib->matches, sizeof(*match));
+    if (!match) return exhausted(env);
+    memset(match, 0, sizeof(*match));
+    match->lib = lib;
+    atomic_fetch_add(&lib->matches_live, 1);
+#ifdef BEAM_RE_TESTING
+    atomic_fetch_add(&test_resources, 1);
+#endif
+    match->pattern = pattern;
+    enif_keep_resource(pattern);
+    match->original_binary = enif_is_binary(env, argv[0]);
+    match->flags = options.flags;
+    match->match_flags = options.match | (first ? 0 : PCRE2_NO_UTF_CHECK);
+    match->offset = options.offset;
+    if (!build_capture(env, &options, pattern->code, &match->capture)) {
+        enif_release_resource(match);
+        return badarg(env, a_none);
+    }
+    match->owned_env = enif_alloc_env();
+    if (!match->owned_env) { enif_release_resource(match); return exhausted(env); }
+    ERL_NIF_TERM owned_subject = enif_make_copy(match->owned_env, argv[0]);
+    if (!enif_inspect_iolist_as_binary(match->owned_env, owned_subject, &subject)) {
+        enif_release_resource(match);
+        return badarg(env, a_none);
+    }
+    static const unsigned char empty_subject[1] = {0};
+    match->subject = subject.data ? subject.data : empty_subject;
+    match->length = subject.size;
+    match->data = pcre2_match_data_create_from_pattern(pattern->code, lib->general);
+    if (!match->data) { enif_release_resource(match); return exhausted(env); }
+    pcre2_set_restart_data(match->data, &match->restart);
+    if (options.flags & (F_MATCH_LIMIT | F_DEPTH_LIMIT)) {
+        match->context = pcre2_match_context_create(lib->general);
+        if (!match->context) { enif_release_resource(match); return exhausted(env); }
+        if (options.flags & F_MATCH_LIMIT) pcre2_set_match_limit(match->context, options.match_limit);
+        if (options.flags & F_DEPTH_LIMIT) pcre2_set_depth_limit(match->context, options.depth_limit);
+    }
+    if (cancelled(env)) { enif_release_resource(match); return enif_raise_exception(env, a_cancelled); }
+    resource = enif_make_resource(env, match);
+    enif_release_resource(match);
+    next[0] = argv[0]; next[1] = resource;
+    return match_continue(env, 2, next);
 }
 
-BIF_RETTYPE
-re_run_3(BIF_ALIST_3)
+static ERL_NIF_TERM run_after_compile(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[])
 {
-    return re_run(BIF_P,BIF_ARG_1, BIF_ARG_2, BIF_ARG_3, true);
+    Options options;
+    (void)argc;
+    if (cancelled(env)) return enif_raise_exception(env, a_cancelled);
+    if (!parse_options(env, argv[2], &options) || options.flags & F_EXPORT)
+        return badarg(env, a_badopt);
+    return run_compiled(env, argv, argv[4], &options, true);
 }
 
-BIF_RETTYPE
-re_run_2(BIF_ALIST_2) 
+static ERL_NIF_TERM run_compile(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[])
 {
-    return re_run(BIF_P,BIF_ARG_1, BIF_ARG_2, NIL, true);
+    ReLibrary *lib = enif_priv_data(env);
+    Options options;
+    ErlNifBinary expression;
+    pcre2_code *code;
+    PCRE2_SIZE error_offset = 0;
+    int error = 0;
+    ERL_NIF_TERM next[5];
+    (void)argc;
+    if (cancelled(env)) return enif_raise_exception(env, a_cancelled);
+    if (!parse_options(env, argv[2], &options) || options.flags & F_EXPORT)
+        return badarg(env, a_badopt);
+    if (!enif_inspect_iolist_as_binary(env, argv[1], &expression)) return badarg(env, a_none);
+    code = compile_code(env, lib, &expression, &options, &error, &error_offset);
+    if (cancelled(env)) { pcre2_code_free(code); return enif_raise_exception(env, a_cancelled); }
+    if (!code) return options.flags & F_REPORT ? compile_error(env, error, error_offset, true) : badarg(env, a_none);
+    next[0] = argv[0]; next[1] = argv[1]; next[2] = argv[2]; next[3] = argv[3];
+    next[4] = compiled(env, lib, code, !!(options.flags & F_UNICODE));
+    if (enif_is_exception(env, next[4])) return next[4];
+    if (cancelled(env)) return enif_raise_exception(env, a_cancelled);
+    return enif_schedule_nif(env, "re_run_after_compile", 0, run_after_compile, 5, next);
 }
 
-/*
- * The "magic" trap target, continue a re:run
- */
-
-static BIF_RETTYPE re_match_trap(BIF_ALIST_3)
-     /* XXX: Optimize - arg 1 and 2 to be utilized for keeping binary 
-	code and subject */
+static ERL_NIF_TERM run_nif(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[])
 {
-    Binary *mbp;
-    RestartContext *restartp;
-    int rc;
-    Sint32 loop_limit;
-    Eterm res;
-    const Sint32 reds_initial = ERTS_BIF_REDS_LEFT(BIF_P);
-    Sint32 reds_consumed;
-
-    mbp = erts_magic_ref2bin(BIF_ARG_3);
-
-    ASSERT(ERTS_MAGIC_BIN_DESTRUCTOR(mbp)
-	   == cleanup_restart_context_bin);
-
-    restartp = (RestartContext *) ERTS_MAGIC_BIN_DATA(mbp);
-    loop_limit = MIN(reds_initial * LOOP_FACTOR, max_loop_limit);
-    pcre2_set_loops_left(restartp->match_data, loop_limit);
-    pcre2_set_restart_flags(restartp->match_data,  0);
-    
-    rc = pcre2_match(NULL, NULL, 0, 0, 0, restartp->match_data, NULL);
-
-    reds_consumed = (loop_limit - pcre2_get_loops_left(restartp->match_data)) / LOOP_FACTOR;
-
-    if (rc < 0) {
-        switch (rc) {
-            /* No match... */
-        case PCRE2_ERROR_NOMATCH:
-        case PCRE2_ERROR_MATCHLIMIT:
-        case PCRE2_ERROR_RECURSIONLIMIT:
-            break;
-        case PCRE2_ERROR_LOOP_LIMIT:
-            /* Trap */
-            BUMP_REDS(BIF_P, reds_consumed);
-            ERTS_VBUMP_ALL_REDS(BIF_P);
-            BIF_TRAP3(&re_match_trap_export, BIF_P, BIF_ARG_1, BIF_ARG_2, BIF_ARG_3);
-            /* Bad utf8 in subject... */
-        case PCRE2_ERROR_BADUTFOFFSET:
-        case PCRE2_ERROR_UTF8_ERR1:
-        case PCRE2_ERROR_UTF8_ERR2:
-        case PCRE2_ERROR_UTF8_ERR3:
-        case PCRE2_ERROR_UTF8_ERR4:
-        case PCRE2_ERROR_UTF8_ERR5:
-        case PCRE2_ERROR_UTF8_ERR6:
-        case PCRE2_ERROR_UTF8_ERR7:
-        case PCRE2_ERROR_UTF8_ERR8:
-        case PCRE2_ERROR_UTF8_ERR9:
-        case PCRE2_ERROR_UTF8_ERR10:
-        case PCRE2_ERROR_UTF8_ERR11:
-        case PCRE2_ERROR_UTF8_ERR12:
-        case PCRE2_ERROR_UTF8_ERR13:
-        case PCRE2_ERROR_UTF8_ERR14:
-        case PCRE2_ERROR_UTF8_ERR15:
-        case PCRE2_ERROR_UTF8_ERR16:
-        case PCRE2_ERROR_UTF8_ERR17:
-        case PCRE2_ERROR_UTF8_ERR18:
-        case PCRE2_ERROR_UTF8_ERR19:
-        case PCRE2_ERROR_UTF8_ERR20:
-        case PCRE2_ERROR_UTF8_ERR21:
-            BUMP_ALL_REDS(BIF_P); /* Unknown amount of work done... */
-            ERTS_FALLTHROUGH();
-
-        case PCRE2_ERROR_BADOFFSET:
-        case PCRE2_ERROR_BADMAGIC:
-        case PCRE2_ERROR_BADMODE:
-            cleanup_restart_context(restartp);
-            BIF_ERROR(BIF_P, BADARG);
-        default:
-            /* Something unexpected happened... */
-            ASSERT(! "Unexpected pcre2_match() result");
-            cleanup_restart_context(restartp);
-            BIF_ERROR(BIF_P, EXC_INTERNAL_ERROR);
-        }
+    Options options;
+    const ERL_NIF_TERM *tuple;
+    int arity;
+    bool list_capture;
+    (void)argc;
+    if (cancelled(env)) return enif_raise_exception(env, a_cancelled);
+    if (!parse_options(env, argv[2], &options) || options.flags & F_EXPORT)
+        return badarg(env, a_badopt);
+    if (argv[3] != a_true && argv[3] != a_false) return badarg(env, a_none);
+    if (enif_get_tuple(env, argv[1], &arity, &tuple) && arity == 5) {
+        if (options.flags & F_COMPILE) return badarg(env, a_none);
+        return run_compiled(env, argv, argv[1], &options, false);
     }
-    BUMP_REDS(BIF_P, reds_consumed);
-
-    res = build_exec_return(BIF_P, rc, restartp, BIF_ARG_1);
- 
-    cleanup_restart_context(restartp);
-
-    BIF_RET(res);
+    if (!enif_is_binary(env, argv[1]) && !enif_is_list(env, argv[1])) return badarg(env, a_none);
+    list_capture = (options.flags & F_CAPTURE) && options.type == a_list;
+    if ((options.flags & F_UNICODE) &&
+        (!enif_is_binary(env, argv[0]) || !enif_is_binary(env, argv[1]) ||
+         (list_capture && !(options.flags & F_GLOBAL))))
+        return dispatch(env, a_urun, 3, argv);
+    return enif_schedule_nif(env, "re_run_compile", ERL_NIF_DIRTY_JOB_CPU_BOUND,
+                             run_compile, 4, argv);
 }
-    
-BIF_RETTYPE
-re_inspect_2(BIF_ALIST_2) 
+static ERL_NIF_TERM inspect_nif(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[])
 {
-    const byte *temp_alloc = NULL;
-    Eterm *tp,*tmp_vec,*hp;
-    int i,j;
-    uint32_t top;
-    uint32_t entrysize;
-    unsigned char *nametable, *last,*name;
-    int has_dupnames;
-    uint32_t options;
-    int num_names;
-    Eterm res;
-    pcre2_code  *code;
-    int infores;
-
-    if (is_not_tuple(BIF_ARG_1) || (arityval(*tuple_val(BIF_ARG_1)) != 5)) {
-	goto error;
+    Pattern *pattern;
+    int captures, unicode, crlf;
+    uint32_t count, size, flags;
+    PCRE2_SPTR names, previous = NULL;
+    ERL_NIF_TERM *values, result;
+    unsigned n = 0;
+    (void)argc;
+    pattern = get_pattern(env, argv[0], &captures, &unicode, &crlf);
+    if (!pattern || argv[1] != a_namelist ||
+        pcre2_pattern_info(pattern->code, PCRE2_INFO_ALLOPTIONS, &flags) ||
+        pcre2_pattern_info(pattern->code, PCRE2_INFO_NAMECOUNT, &count) ||
+        pcre2_pattern_info(pattern->code, PCRE2_INFO_NAMEENTRYSIZE, &size) ||
+        pcre2_pattern_info(pattern->code, PCRE2_INFO_NAMETABLE, &names)) return badarg(env, a_none);
+    if (!count) return enif_make_tuple2(env, a_namelist, enif_make_list(env, 0));
+    values = backend_alloc((size_t)count * sizeof(*values), pattern->lib);
+    if (!values) return exhausted(env);
+    while (count--) {
+        if (!previous || !(flags & PCRE2_DUPNAMES) || strcmp((const char *)previous + 2, (const char *)names + 2))
+            values[n++] = bytes(env, names + 2, strlen((const char *)names + 2));
+        previous = names;
+        names += size;
     }
-    tp = tuple_val(BIF_ARG_1);
-    if (tp[1] != am_re_pattern || is_not_small(tp[2])
-        || is_not_small(tp[3]) || is_not_small(tp[4])
-        || !magic_ref_to_pcre2_code(tp[5], &code)) {
-        goto error;
-    }
-    if (BIF_ARG_2 != am_namelist) {
-        goto error;
-    }
-
-    /* OK, so let's try to get some info */
-    
-    if (pcre2_pattern_info(code, PCRE2_INFO_ALLOPTIONS, &options) != 0)
-	goto error;
-
-    infores = pcre2_pattern_info(code, PCRE2_INFO_NAMECOUNT, &top);
-    ASSERT(infores == 0); (void)infores;
-
-    if (top <= 0) {
-	hp = HAlloc(BIF_P, 3);
-	res = TUPLE2(hp,am_namelist,NIL);
-	erts_free_aligned_binary_bytes(temp_alloc);
-	BIF_RET(res);
-    }
-    infores = pcre2_pattern_info(code, PCRE2_INFO_NAMEENTRYSIZE, &entrysize);
-    ASSERT(infores == 0);
-
-    infores = pcre2_pattern_info(code, PCRE2_INFO_NAMETABLE, &nametable);
-    ASSERT(infores == 0);
-    
-    has_dupnames = ((options & PCRE2_DUPNAMES) != 0);
-    /* First, count the names */
-    num_names = 0;
-    last = NULL;
-    name = nametable;
-    for(i=0;i<top;++i) {
-	if (last == NULL || !has_dupnames || sys_strcmp((char *) last+2,
-						    (char *) name+2)) {
-	    ++num_names;
-	}
-	last = name;
-	name += entrysize;
-    }
-    tmp_vec =  erts_alloc(ERTS_ALC_T_RE_TMP_BUF, 
-			  num_names * sizeof(Eterm));
-    /* Re-iterate and fill tmp_vec */
-    last = NULL;
-    name = nametable;
-    j = 0;
-    for(i=0;i<top;++i) {
-        if (last == NULL ||
-            !has_dupnames ||
-            sys_strcmp((char *)&last[2], (char*)&name[2])) {
-            Uint len = sys_strlen((char*)&name[2]);
-            tmp_vec[j++] = erts_new_binary_from_data(BIF_P, len, (byte*)&name[2]);
-	}
-	last = name;
-	name += entrysize;
-    }
-    ASSERT(j == num_names);
-    hp = HAlloc(BIF_P, 3+2*j);
-    res = NIL;
-    for(i = j-1 ;i >= 0; --i) {
-	res = CONS(hp,tmp_vec[i],res);
-	hp += 2;
-    }
-    res = TUPLE2(hp,am_namelist,res);
-    erts_free_aligned_binary_bytes(temp_alloc);
-    erts_free(ERTS_ALC_T_RE_TMP_BUF, tmp_vec);
-    BIF_RET(res);
-
- error:
-    /* tmp_vec never allocated when we reach here */
-    erts_free_aligned_binary_bytes(temp_alloc);
-    BIF_ERROR(BIF_P,BADARG);
+    result = enif_make_tuple2(env, a_namelist, enif_make_list_from_array(env, values, n));
+    backend_free(values, NULL);
+    return result;
 }
-    
+static ERL_NIF_TERM version_nif(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[])
+{
+    unsigned char version[32];
+    int size = pcre2_config(PCRE2_CONFIG_VERSION, version);
+    (void)argc; (void)argv;
+    if (size <= 0 || size > (int)sizeof(version)) return exhausted(env);
+    return bytes(env, version, (size_t)size - 1);
+}
 
-	
-    
+#ifdef BEAM_RE_TESTING
+static _Atomic(ReLibrary *) test_library;
+#if defined(_WIN32)
+#define RE_TEST_EXPORT __declspec(dllexport)
+#else
+#define RE_TEST_EXPORT __attribute__((visibility("default")))
+#endif
+RE_TEST_EXPORT size_t beam_re_test_allocations(void)
+{
+    return atomic_load(&test_allocations);
+}
+RE_TEST_EXPORT size_t beam_re_test_resources(void)
+{
+    return atomic_load(&test_resources);
+}
+RE_TEST_EXPORT size_t beam_re_test_bytes(void)
+{
+    return atomic_load(&test_bytes);
+}
+RE_TEST_EXPORT size_t beam_re_test_peak_bytes(void)
+{
+    return atomic_load(&test_peak_bytes);
+}
+RE_TEST_EXPORT size_t beam_re_test_total_allocations(void)
+{
+    return atomic_load(&test_total_allocations);
+}
+RE_TEST_EXPORT size_t beam_re_test_total_allocated_bytes(void)
+{
+    return atomic_load(&test_total_allocated_bytes);
+}
+RE_TEST_EXPORT size_t beam_re_test_compile_entered(void)
+{
+    return atomic_load(&test_compile_entries);
+}
+RE_TEST_EXPORT size_t beam_re_test_compile_active(void)
+{
+    return atomic_load(&test_compile_running);
+}
+RE_TEST_EXPORT unsigned beam_re_test_compile_hold(unsigned milliseconds)
+{
+    if (milliseconds > 1000) milliseconds = 1000;
+    return atomic_exchange(&test_compile_hold_ms, milliseconds);
+}
+RE_TEST_EXPORT unsigned beam_re_test_fail_load(unsigned stage)
+{
+    if (stage > 2) stage = 0;
+    return atomic_exchange(&test_fail_load_stage, stage);
+}
+RE_TEST_EXPORT int beam_re_test_set_limit(int limit)
+{
+    ReLibrary *lib = atomic_load(&test_library);
+    if (!lib) return -1;
+    unsigned previous = atomic_exchange(&lib->loop_limit, limit > 0 ? (unsigned)limit : RE_LOOP_LIMIT);
+    return previous == RE_LOOP_LIMIT ? -1 : (int)previous;
+}
+RE_TEST_EXPORT size_t beam_re_test_yield_coverage(const int **lines, const uint64_t **visits,
+                                                 const uint64_t **yields)
+{
+#ifdef DEBUG
+    extern const int erts_dbg_pcre_cost_chk_lines[];
+    extern uint64_t erts_dbg_pcre_cost_chk_visits[], erts_dbg_pcre_cost_chk_yields[];
+    extern const int erts_dbg_pcre_cost_chk_cnt;
+    *lines = erts_dbg_pcre_cost_chk_lines;
+    *visits = erts_dbg_pcre_cost_chk_visits;
+    *yields = erts_dbg_pcre_cost_chk_yields;
+    return (size_t)erts_dbg_pcre_cost_chk_cnt;
+#else
+    *lines = NULL; *visits = NULL; *yields = NULL;
+    return 0;
+#endif
+}
+#endif
 
-	
+static int load(ErlNifEnv *env, void **private_data, ERL_NIF_TERM information)
+{
+    ReLibrary *lib;
+    ErlNifResourceFlags tried;
+    (void)information;
+#ifdef BEAM_RE_TESTING
+    unsigned fail_stage = atomic_exchange(&test_fail_load_stage, 0);
+    if (fail_stage == 1) return -1;
+#endif
+    lib = enif_alloc(sizeof(*lib));
+    if (!lib) return -1;
+    memset(lib, 0, sizeof(*lib));
+    atomic_init(&lib->bytes, 0); atomic_init(&lib->peak_bytes, 0);
+    atomic_init(&lib->allocations, 0); atomic_init(&lib->patterns_live, 0);
+    atomic_init(&lib->matches_live, 0); atomic_init(&lib->yields, 0);
+    atomic_init(&lib->loop_limit, RE_LOOP_LIMIT);
+#define INIT_ATOM(n) a_##n = enif_make_atom(env, #n);
+    ATOMS(INIT_ATOM)
+#undef INIT_ATOM
+    lib->patterns = enif_open_resource_type(env, NULL, "beam_re_pattern", pattern_destructor,
+                                            ERL_NIF_RT_CREATE, &tried);
+    lib->matches = enif_open_resource_type(env, NULL, "beam_re_match", match_destructor,
+                                           ERL_NIF_RT_CREATE, &tried);
+#ifdef BEAM_RE_TESTING
+    lib->coverage_lock = enif_mutex_create("beam_re_yield_coverage");
+#endif
+    lib->general = pcre2_general_context_create(backend_alloc, backend_free, lib);
+    if (!lib->patterns || !lib->matches || !lib->general
+#ifdef BEAM_RE_TESTING
+        || !lib->coverage_lock
+        || fail_stage == 2
+#endif
+    ) {
+        pcre2_general_context_free(lib->general);
+#ifdef BEAM_RE_TESTING
+        if (lib->coverage_lock) enif_mutex_destroy(lib->coverage_lock);
+#endif
+        enif_free(lib);
+        return -1;
+    }
+    *private_data = lib;
+#ifdef BEAM_RE_TESTING
+    atomic_store(&test_library, lib);
+#endif
+    return 0;
+}
+static void unload(ErlNifEnv *env, void *private_data)
+{
+    ReLibrary *lib = private_data;
+    (void)env;
+#ifdef BEAM_RE_TESTING
+    atomic_store(&test_library, NULL);
+    enif_mutex_destroy(lib->coverage_lock);
+#endif
+    pcre2_general_context_free(lib->general);
+    if (atomic_load(&lib->allocations) || atomic_load(&lib->patterns_live) ||
+        atomic_load(&lib->matches_live))
+        beam_native_report_cleanup(1, "regular-expression backend retained native state at unload");
+    enif_free(lib);
+}
+static ErlNifFunc functions[] = {
+    {"compile_nif", 2, compile_nif, ERL_NIF_DIRTY_JOB_CPU_BOUND},
+    {"run_nif", 4, run_nif, 0},
+    {"inspect_nif", 2, inspect_nif, 0},
+    {"import_nif", 1, import_nif, ERL_NIF_DIRTY_JOB_CPU_BOUND},
+    {"version_nif", 0, version_nif, 0}
+};
+ERL_NIF_INIT(re, functions, load, NULL, NULL, unload)

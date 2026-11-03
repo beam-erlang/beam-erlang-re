@@ -1,0 +1,23 @@
+cmake_minimum_required(VERSION 3.25)
+project(re_embedding LANGUAGES C)
+find_package(BEAM CONFIG REQUIRED COMPONENTS ${RUNTIME_COMPONENT} Host NIF)
+set(BUILD_TESTING OFF CACHE BOOL "" FORCE)
+set(BEAM_RE_TEST_INSTRUMENTATION ON CACHE BOOL "" FORCE)
+add_subdirectory("${PACKAGE_SOURCE}" native)
+find_library(HOST_PCRE2_LIBRARY NAMES pcre2-8 REQUIRED)
+find_path(HOST_PCRE2_INCLUDE pcre2.h REQUIRED)
+add_executable(re_host main.c tracer.c import_bounds.c)
+set_source_files_properties(import_bounds.c PROPERTIES
+    INCLUDE_DIRECTORIES "${PACKAGE_SOURCE}/vendor/pcre2;${CMAKE_CURRENT_BINARY_DIR}/native/generated"
+    COMPILE_DEFINITIONS "ERLANG_INTEGRATION;PCRE2_CODE_UNIT_WIDTH=8;PCRE2_STATIC;HAVE_CONFIG_H")
+target_compile_definitions(re_host PRIVATE _DEFAULT_SOURCE)
+target_include_directories(re_host PRIVATE "${FIXTURE_DIRECTORY}" "${HOST_PCRE2_INCLUDE}")
+target_link_libraries(re_host PRIVATE BEAM::${RUNTIME_COMPONENT} BEAM::Host BEAM::NIF "${HOST_PCRE2_LIBRARY}")
+set_target_properties(re_host PROPERTIES ENABLE_EXPORTS TRUE
+    BUILD_WITH_INSTALL_RPATH TRUE INSTALL_RPATH "$ORIGIN/../lib")
+if(BEAM_RE_NATIVE_KIND STREQUAL "STATIC")
+    get_target_property(_header re_native BEAM_NIF_HEADER)
+    get_target_property(_binding re_native BEAM_NIF_BINDING)
+    target_compile_definitions(re_host PRIVATE BINDING_HEADER="${_header}" LINKED_BINDING=${_binding})
+    target_link_libraries(re_host PRIVATE re_native)
+endif()

@@ -20,12 +20,23 @@ mem = [i for i, line in enumerate(lines, 1) if 'MEMCHR_ERLANG(' in line and 'def
 (a.output / 'pcre2_match_yield_coverage.gen.h').write_text(''.join(
     f'#define ERLANG_YIELD_POINT_{i} {n}\n{i},\n' for n, i in enumerate(cost + mem)) +
     f'#define ERLANG_YIELD_POINT_CNT {len(cost)+len(mem)}\n')
-headers = '\n'.join((a.source / n).read_text() for n in ('pcre2.h', 'pcre2_internal.h', 'pcre2_intmodedep.h'))
-symbols = {n + '8' for n in re.findall(r'PCRE2_SUFFIX\(([A-Za-z_][A-Za-z0-9_]*)\)', headers)}
-aliases = set(re.findall(r'^#define\s+(_pcre2_\w+)\s+PCRE2_SUFFIX', headers, re.M))
-symbols.update('_pcre2_' + n for n in re.findall(r'PRIV\(([A-Za-z_][A-Za-z0-9_]*)\)', headers)
-               if '_pcre2_' + n not in aliases and n != 'name')
-symbols.update(re.findall(r'\berts_dbg_pcre_\w+', '\n'.join(lines)))
+headers = '\n'.join(path.read_text() for path in sorted(a.source.glob('*.h')))
+sources = '\n'.join(path.read_text() for path in sorted(a.source.glob('*.c')))
+identifier = r'[A-Za-z_][A-Za-z0-9_]*'
+suffix = rf'PCRE2_SUFFIX\(\s*({identifier})\s*\)'
+# PCRE2_SUFFIX appends the width directly. Some declarations include a trailing
+# underscore and some do not; retain the exact token instead of normalizing it.
+parameters = set(re.findall(rf'^\s*#\s*define\s+{suffix}', headers, re.M))
+symbols = {name + '8' for name in re.findall(suffix, headers) if name not in parameters}
+aliases = {name: target + '8' for name, target in re.findall(
+    rf'^\s*#\s*define\s+(_pcre2_\w+)\s+{suffix}', headers, re.M)}
+# PRIV itself concatenates an unsuffixed name; a declaration may then map that
+# name through PCRE2_SUFFIX. The Erlang interruption helpers remain unsuffixed.
+for name in re.findall(rf'PRIV\(\s*({identifier})\s*\)', headers + '\n' + sources):
+    if name != 'name':
+        symbol = '_pcre2_' + name
+        symbols.add(aliases.get(symbol, symbol))
+symbols.update(re.findall(r'\berts_dbg_pcre_\w+', headers + '\n' + sources))
 (a.output / 'backend_symbols.h').write_text('/* Generated from the pinned backend declarations. */\n' + ''.join(
     f'#define {n} beam_re_backend_{n.lstrip("_")}\n' for n in sorted(symbols)))
 (a.output / 'config.h').write_text('''/* Package-owned backend configuration. */

@@ -1,0 +1,180 @@
+{
+  "format": 1,
+  "upstream_commit": "550d7b7898706c7822362c42e7b93120c1d1f29a",
+  "harness": {
+    "selection": "Run re_SUITE:all/0 unchanged in order; no omitted cases.",
+    "deadline": "Read the original suite timetrap and enforce it independently for every case.",
+    "ct_hooks": "The Common Test install hook is replaced by explicitly compiled, embedded fixture inputs. No OTP applications or services start.",
+    "failures": "Exceptions, timetraps, explicit skips and nonpassing yield coverage remain nonpassing.",
+    "feature_defaults": "Initialize the pinned default enabled feature maybe_expr and keywords maybe/else explicitly; erl_features formatter queries need no OTP init process."
+  },
+  "files": [
+    {
+      "source": "../upstream/re_SUITE.erl",
+      "output": "re_SUITE.erl",
+      "sha256": "9b4daf209df7ed956babb8dd1b5d65c7b8ac785a952b0af60fce0e5fe629efc2",
+      "replacements": [
+        {
+          "old": "io:format(",
+          "new": "re_test_io:format(",
+          "reason": "Send diagnostics to the embedding test sink without an OTP I/O service.",
+          "count": 6
+        },
+        {
+          "old": "erts_debug:set_internal_state(",
+          "new": "re_test_support:set_internal_state(",
+          "reason": "Route regex loop-budget controls to the package test backend; no VM regex state is used.",
+          "count": 3
+        },
+        {
+          "old": "erts_debug:get_internal_state(",
+          "new": "re_test_support:get_internal_state(",
+          "reason": "Read the package backend yield coverage instead of the retained VM backend.",
+          "count": 1
+        },
+        {
+          "old": "-include_lib(\"common_test/include/ct.hrl\").",
+          "new": "-include(\"ct.hrl\").",
+          "reason": "Select copied pinned test headers explicitly.",
+          "count": 1
+        },
+        {
+          "old": "-include_lib(\"kernel/include/file.hrl\").",
+          "new": "-include(\"file.hrl\").",
+          "reason": "Select copied pinned test headers explicitly.",
+          "count": 1
+        },
+        {
+          "old": "{trace,P,out,{erlang,re_run_trap,3}}",
+          "new": "{trace,P,out,{re,re_match_continue,2}}",
+          "reason": "Observe the regular NIF continuation; keep the original yield-count and result assertions.",
+          "count": 1
+        },
+        {
+          "old": "ct:fail(",
+          "new": "re_test_support:fail(",
+          "reason": "Map Common Test failure to an explicit standalone test failure.",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "source": "../upstream/run_pcre_tests.erl",
+      "output": "run_pcre_tests.erl",
+      "sha256": "872729750ea32c55e4f9a4a12362fdfeeea465961ab9a7f340c041ddae619650",
+      "replacements": [
+        {
+          "old": "io:format(",
+          "new": "re_test_io:format(",
+          "reason": "Send diagnostics to the embedding test sink without an OTP I/O service.",
+          "count": 42
+        },
+        {
+          "old": "file:read_file(",
+          "new": "re_test_support:read_file(",
+          "reason": "Read pinned corpus bytes through the host-provided test-only native file operation.",
+          "count": 3
+        },
+        {
+          "old": "filename:join(",
+          "new": "re_test_support:join(",
+          "reason": "Use explicit test paths without OTP filename/application services.",
+          "count": 1
+        },
+        {
+          "old": "filename:basename(",
+          "new": "re_test_support:basename(",
+          "reason": "Retain corpus diagnostic basenames through a local pure helper.",
+          "count": 3
+        },
+        {
+          "old": "erts_debug:set_internal_state(",
+          "new": "re_test_support:set_internal_state(",
+          "reason": "Route regex loop-budget controls to the package test backend; no VM regex state is used.",
+          "count": 4
+        }
+      ]
+    },
+    {
+      "source": "../upstream/run_old_pcre1_tests.erl",
+      "output": "run_old_pcre1_tests.erl",
+      "sha256": "7ed7bc87a0ac6fffe2be54e45a01309a079856dc48ef8f0054554e5b5bbfb52e",
+      "replacements": [
+        {
+          "old": "io:format(",
+          "new": "re_test_io:format(",
+          "reason": "Send diagnostics to the embedding test sink without an OTP I/O service.",
+          "count": 40
+        },
+        {
+          "old": "file:read_file(",
+          "new": "re_test_support:read_file(",
+          "reason": "Read pinned corpus bytes through the host-provided test-only native file operation.",
+          "count": 3
+        },
+        {
+          "old": "filename:join(",
+          "new": "re_test_support:join(",
+          "reason": "Use explicit test paths without OTP filename/application services.",
+          "count": 1
+        },
+        {
+          "old": "filename:basename(",
+          "new": "re_test_support:basename(",
+          "reason": "Retain corpus diagnostic basenames through a local pure helper.",
+          "count": 3
+        },
+        {
+          "old": "erts_debug:set_internal_state(",
+          "new": "re_test_support:set_internal_state(",
+          "reason": "Route regex loop-budget controls to the package test backend; no VM regex state is used.",
+          "count": 4
+        }
+      ]
+    },
+    {
+      "source": "../upstream/error_info_lib.erl",
+      "output": "error_info_lib.erl",
+      "sha256": "eac1dbbd36801cff352d357ff29e050ab2a599a07b6baccaa0ffa4e5c5e2fcb5",
+      "replacements": [
+        {
+          "old": "io:format(",
+          "new": "re_test_io:format(",
+          "reason": "Send diagnostics to the embedding test sink without an OTP I/O service.",
+          "count": 2
+        },
+        {
+          "old": "ct:fail(",
+          "new": "re_test_support:fail(",
+          "reason": "Map Common Test failure to an explicit standalone test failure.",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "source": "../upstream/re_testoutput1_replacement_test.erl",
+      "output": "re_testoutput1_replacement_test.erl",
+      "sha256": "df8ca341a7dcc6f74779d5aae46a1ce0cdd84db122643b8f736538ea3057b34d",
+      "replacements": []
+    },
+    {
+      "source": "../upstream/re_testoutput1_split_test.erl",
+      "output": "re_testoutput1_split_test.erl",
+      "sha256": "5af5444a8e3d464434cbdf5b0396cdd45176725f468149b6199b2740349ce22c",
+      "replacements": []
+    },
+    {
+      "source": "support/epp.erl",
+      "output": "epp.erl",
+      "sha256": "f8754d17e985ebc2e6361d58ccda80370a8a17931ceff99a0c6e0be83ed07fd4",
+      "replacements": [
+        {
+          "old": "-include_lib(\"kernel/include/file.hrl\").",
+          "new": "-include(\"file.hrl\").",
+          "count": 1,
+          "reason": "Explicit copied pinned header for test-only default_encoding helper; no preprocessor I/O operations execute."
+        }
+      ]
+    }
+  ]
+}

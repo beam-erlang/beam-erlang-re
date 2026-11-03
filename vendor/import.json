@@ -327,6 +327,12 @@
       "source": "lib/stdlib/test/run_pcre_tests.erl",
       "destination": "tests/upstream/run_pcre_tests.erl",
       "sha256": "872729750ea32c55e4f9a4a12362fdfeeea465961ab9a7f340c041ddae619650"
+    },
+    {
+      "source": "lib/stdlib/src/erl_stdlib_errors.erl",
+      "destination": "src/beam_re_errors.erl",
+      "sha256": "1cb77a02ac33a5bba24a9023783d9e4218c8589634041451d9a5c158b811f0b9",
+      "adaptation": "Regex-only formatter extraction with local helpers and private module identity."
     }
   ]
 }

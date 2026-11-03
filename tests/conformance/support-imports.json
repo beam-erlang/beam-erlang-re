@@ -1,0 +1,104 @@
+{
+  "format": 1,
+  "upstream_commit": "550d7b7898706c7822362c42e7b93120c1d1f29a",
+  "files": [
+    {
+      "source": "lib/common_test/include/ct.hrl",
+      "path": "support/ct.hrl",
+      "sha256": "2a0ce905bc5ff811916abadcae32698fbec981ff4693645933f50676d67bb10e"
+    },
+    {
+      "source": "lib/kernel/include/file.hrl",
+      "path": "support/file.hrl",
+      "sha256": "4c7ed0e4cc09c454f65c0bf0528e6e56d94ab309e232a4e25db9a486df950299"
+    },
+    {
+      "source": "lib/stdlib/src/binary.erl",
+      "path": "support/binary.erl",
+      "sha256": "824eb8574ab19b7df1a80402562a6b05012e9b1b464916e5694e07e601fb24dc"
+    },
+    {
+      "source": "lib/stdlib/src/erl_error.erl",
+      "path": "support/erl_error.erl",
+      "sha256": "4da31e2704573e81cf97f0a0695518b1ba1771b7408f1479d6fa6eea2c9882bb"
+    },
+    {
+      "source": "lib/stdlib/src/erl_internal.erl",
+      "path": "support/erl_internal.erl",
+      "sha256": "d7d62083e74560591851d85821b379274fdcc88a7e10870ae6a7448775abef9d"
+    },
+    {
+      "source": "lib/stdlib/src/erl_scan.erl",
+      "path": "support/erl_scan.erl",
+      "sha256": "57104bc88e32d6c0533fd062b36a03eb9562b57025fe91368d3ed9b27861d2f8"
+    },
+    {
+      "source": "lib/stdlib/src/io_lib.erl",
+      "path": "support/io_lib.erl",
+      "sha256": "c8dbd79ec4fbba1deff0f554ae9913d11821fbcc71a57d7b230c4bc54d80318f"
+    },
+    {
+      "source": "lib/stdlib/src/io_lib_format.erl",
+      "path": "support/io_lib_format.erl",
+      "sha256": "8ecbee07d2a39edf081e2888ddb47e8fdfc4b58ee452dd34306e1d1d3cf32c7f"
+    },
+    {
+      "source": "lib/stdlib/src/io_lib_pretty.erl",
+      "path": "support/io_lib_pretty.erl",
+      "sha256": "c489356b654c63453ef217bf73235ab7f2df1e99fe5cdd8b0424461d860d910b"
+    },
+    {
+      "source": "lib/stdlib/src/lists.erl",
+      "path": "support/lists.erl",
+      "sha256": "d429e541ca76aca8c56bb9ff31130a3b636f33d3e1923a08683157bf5709ab47"
+    },
+    {
+      "source": "lib/stdlib/src/maps.erl",
+      "path": "support/maps.erl",
+      "sha256": "350c707ff10180e1677cd911a4e981abcce2207db69ce5c986bb1c000d69a816"
+    },
+    {
+      "source": "lib/stdlib/src/ordsets.erl",
+      "path": "support/ordsets.erl",
+      "sha256": "526d1505d6cc482497f812879cdb41c533ea4bfc103e74850245f84c465cd70d"
+    },
+    {
+      "source": "lib/stdlib/src/proplists.erl",
+      "path": "support/proplists.erl",
+      "sha256": "a0cabb89dd3fc82ddcefc2c14502d12b6a4e0503a84b45867fcc18ee1f2e96a0"
+    },
+    {
+      "source": "lib/stdlib/src/string.erl",
+      "path": "support/string.erl",
+      "sha256": "2af1b99230fc09b9ba4160b520f5c0bb2ccefd98b2cade481ae412e883c3e152"
+    },
+    {
+      "source": "lib/stdlib/src/swar_ascii.hrl",
+      "path": "support/swar_ascii.hrl",
+      "sha256": "6803ca275eb3eec4079fb76e01944494ad9345cfac33d3cc91b318f2516ce3a9"
+    },
+    {
+      "source": "lib/stdlib/src/unicode.erl",
+      "path": "support/unicode.erl",
+      "sha256": "9b7b0e9ce44b8a1f3db379da4cdfc692f83c0e6cc741c96241b0ad563780b156"
+    },
+    {
+      "source": "generated/unicode_util.erl",
+      "path": "support/unicode_util.erl",
+      "sha256": "12dcaef7d0948a3f99af4577f7219fadf1ddde39085e85de70232ce254520afc",
+      "generator": "lib/stdlib/uc_spec/gen_unicode_mod.escript",
+      "generator_commit": "550d7b7898706c7822362c42e7b93120c1d1f29a",
+      "attestation": "source-attested original generated output; unchanged generated source hash"
+    },
+    {
+      "source": "lib/stdlib/src/epp.erl",
+      "path": "support/epp.erl",
+      "sha256": "f8754d17e985ebc2e6361d58ccda80370a8a17931ceff99a0c6e0be83ed07fd4"
+    },
+    {
+      "source": "lib/stdlib/src/erl_features.erl",
+      "path": "support/erl_features.erl",
+      "sha256": "a70921d90084c411b6afb488379fe58bdbe72338f328b6206e69ac3ebbfac668"
+    }
+  ]
+}

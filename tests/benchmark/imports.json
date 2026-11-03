@@ -1,0 +1,16 @@
+{
+  "format": 1,
+  "commit": "550d7b7898706c7822362c42e7b93120c1d1f29a",
+  "files": [
+    {
+      "source": "lib/stdlib/src/re.erl",
+      "destination": "original/re.erl",
+      "sha256": "4f121979023d8e5011d2e026600250dedd284c3a5b909e38688efd34d5b74128"
+    },
+    {
+      "source": "lib/stdlib/doc/src/re.md",
+      "destination": "doc/src/re.md",
+      "sha256": "9647afae53439a8b8f01747839acbc87ded3ce42a06955071038aa9b14ac9537"
+    }
+  ]
+}
