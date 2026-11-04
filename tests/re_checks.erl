@@ -160,8 +160,13 @@ limits() ->
     ok.
 
 errors() ->
+    Malformed = <<"could not parse regular expression\n"
+                  "missing closing parenthesis on character 1">>,
     expect_badarg(compile, [not_iodata], [{1, <<"not an iodata term">>}]),
     expect_badarg(compile, ["a", [bad_option]], [{2, <<"invalid options">>}]),
+    expect_badarg(compile, ["(", [bad_option]],
+                  [{1, Malformed}, {2, <<"invalid options">>}]),
+    expect_badarg(run, ["a", "("], [{2, Malformed}]),
     expect_badarg(run, [not_iodata, "a"], [{1, <<"not an iodata term">>}]),
     expect_badarg(run, ["a", {re_pattern,0,0,0,make_ref()}],
                   [{2, <<"neither an iodata term nor a compiled regular expression">>}]),
@@ -178,7 +183,7 @@ errors() ->
             true = is_list(Text),
             true = is_integer(Offset)
     end,
-    ok.
+    profile_absence().
 
 expect_badarg(Function, Args, Expected) ->
     try apply(re, Function, Args) of

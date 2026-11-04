@@ -41,6 +41,10 @@ cache, not an untrusted-input format: these checks do not verify all opcodes or
 authenticate the producer. Preserve that trust boundary when changing decoding.
 No hot native replacement is promised.
 
+Malformed-pattern diagnostics use the same `beam_unicode` conversion binding as
+the facade. Canonical conformance supplies that name through its test-only bridge;
+production formatting does not require the canonical `unicode` module.
+
 Independent tests own copied inputs, fixture sources, source-bound adaptation
 records and process cleanup. Test-only loop controls and allocation counters are
 excluded from production native entries. Build/install under ignored directories;

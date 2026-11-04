@@ -165,7 +165,7 @@ expand_error(not_iodata) -> <<"not an iodata term">>;
 expand_error(not_regexp) ->
     <<"neither an iodata term nor a compiled regular expression">>;
 expand_error({bad_regexp, {Reason, Column}}) ->
-    unicode:characters_to_binary(
+    beam_unicode:characters_to_binary(
       ["could not parse regular expression\n", Reason,
        " on character ", integer_to_binary(Column)], unicode);
 expand_error(Text) when is_binary(Text) -> Text.
