@@ -28,12 +28,13 @@ installs code. Native artifacts match the exact selected SDK build. Shared and
 static outputs are independent selections; the embedding host selects its VM.
 
 Embedding hosts bind `chardata_to_utf8_2` and `chardata_to_codepoints_2` to
-`beam_runtime_unicode:characters_to_binary/2` and `characters_to_list/2`.
+`beam_unicode:characters_to_binary/2` and `characters_to_list/2`.
 These native conversions need no ordinary Unicode code. The private identities
 are exact-SDK runtime details; the modern CLI supplies them. The bare modern
-test profile has 41 bindings. Independent canonical conformance uses 558
-bindings and a test-only ordinary Unicode bridge. The same production sources
-are compiled with each host's target binding profile. The bridge is excluded from production archives.
+test profile has 42 bindings. Independent canonical conformance uses 556
+bindings and test-only ordinary Unicode/binary bridges. The same production
+sources are compiled with each host's target binding profile. The bridges are
+excluded from production archives.
 
 The [API reference](doc/src/re.md) describes regular-expression syntax. The Erlang
 source documents functions and options. [Maintenance](docs/maintenance.md) owns

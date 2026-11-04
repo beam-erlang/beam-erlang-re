@@ -47,10 +47,11 @@ excluded from production native entries. Build/install under ignored directories
 generated results and development reports do not belong in product documentation.
 
 Installed bare acceptance uses independent target binding profiles. Modern
-selects 41 contracts for the implementation and its test controllers, with none
+selects 42 contracts for the implementation and its test controllers, with none
 of the nine canonical facade modules. Canonical conformance selects all 556
-canonical contracts plus package-owned repetition and referenced-size operations.
-Its test-only `beam_runtime_unicode` bridge calls canonical conversions.
+canonical contracts. Its test-only `beam_binary` bridge calls canonical
+repetition and referenced-size operations.
+Its test-only `beam_unicode` bridge calls canonical conversions.
 The same production sources are compiled for each target profile; the native
 implementation and algorithm remain shared while imports name that host's
 selected destinations. Preserve upstream hashes, selections, assertions and

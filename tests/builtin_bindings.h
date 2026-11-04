@@ -4,10 +4,10 @@
 #include <beam/runtime.h>
 /* Independent modern and canonical fixture compositions; no descriptor aliases. */
 static const beam_builtin_binding re_test_modern_bindings[] = {
-    {sizeof(beam_builtin_binding), "bytes_referenced_size_modern_1", "beam_bytes", "referenced_size", 1},
-    {sizeof(beam_builtin_binding), "bytes_repeat_modern_2", "beam_bytes", "repeat", 2},
-    {sizeof(beam_builtin_binding), "chardata_to_codepoints_2", "beam_runtime_unicode", "characters_to_list", 2},
-    {sizeof(beam_builtin_binding), "chardata_to_utf8_2", "beam_runtime_unicode", "characters_to_binary", 2},
+    {sizeof(beam_builtin_binding), "bitstring_referenced_size_1", "beam_binary", "referenced_byte_size", 1},
+    {sizeof(beam_builtin_binding), "bytes_copy_2", "beam_binary", "copy", 2},
+    {sizeof(beam_builtin_binding), "chardata_to_codepoints_2", "beam_unicode", "characters_to_list", 2},
+    {sizeof(beam_builtin_binding), "chardata_to_utf8_2", "beam_unicode", "characters_to_binary", 2},
     {sizeof(beam_builtin_binding), "persistent_value_erase_1", "beam_persistent_term", "erase", 1},
     {sizeof(beam_builtin_binding), "persistent_value_get_1", "beam_persistent_term", "get", 1},
     {sizeof(beam_builtin_binding), "persistent_value_get_2", "beam_persistent_term", "get", 2},
@@ -23,6 +23,7 @@ static const beam_builtin_binding re_test_modern_bindings[] = {
     {sizeof(beam_builtin_binding), "vm_error_2", "beam", "error", 2},
     {sizeof(beam_builtin_binding), "vm_error_3", "beam", "error", 3},
     {sizeof(beam_builtin_binding), "vm_erts_debug_unaligned_bitstring_2", "erts_debug", "unaligned_bitstring", 2},
+    {sizeof(beam_builtin_binding), "vm_erts_internal_trace_3", "erts_internal", "trace", 3},
     {sizeof(beam_builtin_binding), "vm_exit_2", "beam", "exit", 2},
     {sizeof(beam_builtin_binding), "vm_hd_1", "beam", "hd", 1},
     {sizeof(beam_builtin_binding), "vm_integer_to_binary_1", "beam", "integer_to_binary", 1},
@@ -603,7 +604,5 @@ static const beam_builtin_binding re_test_canonical_bindings[] = {
     {sizeof(beam_builtin_binding), "term_table_internal_delete_all_2", "ets", "internal_delete_all", 2},
     {sizeof(beam_builtin_binding), "term_table_internal_select_delete_2", "ets", "internal_select_delete", 2},
     {sizeof(beam_builtin_binding), "term_table_update_element_4", "ets", "update_element", 4},
-    {sizeof(beam_builtin_binding), "bytes_repeat_modern_2", "beam_bytes", "repeat", 2},
-    {sizeof(beam_builtin_binding), "bytes_referenced_size_modern_1", "beam_bytes", "referenced_size", 1},
 };
 #endif

@@ -1236,7 +1236,7 @@ convert_split_result(List, binary, _Unicode) ->
     %% As it happens, the iodata is actually binaries
     List;
 convert_split_result(List, list, true) ->
-    [beam_runtime_unicode:characters_to_list(Element,unicode) || Element <- List];
+    [beam_unicode:characters_to_list(Element,unicode) || Element <- List];
 convert_split_result(List, list, false) ->
     [binary_to_list(Element) || Element <- List].
 
@@ -1430,14 +1430,14 @@ replace(Subject,RE,Replacement,Options) ->
 		    false ->
 			iolist_to_binary(IoList);
 		    true ->
-			beam_runtime_unicode:characters_to_binary(IoList,unicode)
+			beam_unicode:characters_to_binary(IoList,unicode)
 		end;
 	    list ->
 		case Unicode of
 		    false ->
 			binary_to_list(iolist_to_binary(IoList));
 		    true ->
-			beam_runtime_unicode:characters_to_list(IoList,unicode)
+			beam_unicode:characters_to_list(IoList,unicode)
 		end
 	end
     catch
@@ -1733,7 +1733,7 @@ listify({match,M},Flat,Uni) ->
 		case Uni of
 		    true ->
 			<<_:SPos/binary,Res:SLen/binary,_/binary>> = Flat,
-			beam_runtime_unicode:characters_to_list(Res,unicode);
+			beam_unicode:characters_to_list(Res,unicode);
 		    false ->
 			Start = SPos + 1,
 			End = SPos + SLen,
@@ -1757,7 +1757,7 @@ ulistify({match,M},Flat) ->
 		[];
 	    {SPos,SLen} ->
 		      <<_:SPos/binary,Res:SLen/binary,_/binary>> = Flat,
-		      beam_runtime_unicode:characters_to_list(Res,unicode)
+		      beam_unicode:characters_to_list(Res,unicode)
 	      end || {I,L} <- M ]};
 ulistify(Else,_) ->
     Else.
@@ -1776,7 +1776,7 @@ process_uparams([],Type) ->
 -doc false.
 ucompile(RE,Options) ->
     try
-	re:compile(beam_runtime_unicode:characters_to_binary(RE,unicode),Options)
+	re:compile(beam_unicode:characters_to_binary(RE,unicode),Options)
     catch
 	error:AnyError:Stack ->
             raise_public(compile, [RE,Options], AnyError, Stack)
@@ -1799,14 +1799,14 @@ urun2(Subject0,RE0,Options0) ->
 			    _ ->
 				{Options0,false}
 			end,
-    Subject = beam_runtime_unicode:characters_to_binary(Subject0,unicode),
+    Subject = beam_unicode:characters_to_binary(Subject0,unicode),
     RE = case RE0 of
 	     BinRE when is_binary(BinRE) ->
 		 BinRE;
 	     {re_pattern,_,_,_,_} = ReCompiled ->
 		 ReCompiled;
 	     ListRE ->
-		 beam_runtime_unicode:characters_to_binary(ListRE,unicode)
+		 beam_unicode:characters_to_binary(ListRE,unicode)
 	 end,
     Ret = re:run(Subject,RE,Options),
     case RetType of
@@ -2002,7 +2002,7 @@ runopt(_) ->
 to_binary(Bin, _IsUnicode) when is_binary(Bin) ->
     Bin;
 to_binary(Data, true) ->
-    beam_runtime_unicode:characters_to_binary(Data,unicode);
+    beam_unicode:characters_to_binary(Data,unicode);
 to_binary(Data, false) ->
     iolist_to_binary(Data).
 

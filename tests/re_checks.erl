@@ -244,11 +244,11 @@ unalign(Binary) ->
     erts_debug:unaligned_bitstring(Binary, 3).
 
 sub_binaries() ->
-    Subject = beam_bytes:repeat(<<"abcd">>, 1024),
+    Subject = beam_binary:copy(<<"abcd">>, 1024),
     {match, [Subject]} = re:run(Subject, <<"^.+$">>, [{capture, first, binary}]),
     {match, [Capture]} = re:run(Subject, <<"^.{512}(.{512})">>, [{capture, [1], binary}]),
     512 = byte_size(Capture),
-    true = beam_bytes:referenced_size(Capture) >= byte_size(Subject),
+    true = beam_binary:referenced_byte_size(Capture) >= byte_size(Subject),
     ?RETENTION:put({?MODULE, capture}, Capture),
     erlang:garbage_collect(),
     Capture = ?RETENTION:get({?MODULE, capture}),
@@ -280,13 +280,13 @@ share_checks() ->
 yield_checks() ->
     Previous = beam_re_test:set_limit(-1),
     try
-        Subject = beam_bytes:repeat(<<"abc\n">>, 100000),
+        Subject = beam_binary:copy(<<"abc\n">>, 100000),
         Go = make_ref(),
         {Pid, Ref} = erlang:spawn_monitor(fun() ->
             receive Go -> ok end,
             {match, [{1,1}]} = re:run(Subject, <<"b">>, [unicode])
         end),
-        1 = ?BEAM_VM:trace(Pid, true, [running]),
+        1 = erlang:trace(Pid, true, [running]),
         Pid ! Go,
         Count = validation_trace(Pid, Ref, 0),
         true = Count >= 5,
@@ -382,13 +382,13 @@ compiled_kill() ->
 kill_matching(Pattern) ->
     Previous = beam_re_test:set_limit(1),
     try
-        Subject = beam_bytes:repeat(<<"hejsan">>, 100000),
+        Subject = beam_binary:copy(<<"hejsan">>, 100000),
         Go = make_ref(),
         {Pid, Ref} = erlang:spawn_monitor(fun() ->
             receive Go -> ok end,
             re:run(Subject, Pattern)
         end),
-        1 = ?BEAM_VM:trace(Pid, true, [running]),
+        1 = erlang:trace(Pid, true, [running]),
         Pid ! Go,
         receive
             {trace, Pid, out, {re, re_match_continue, 2}} -> ok;
@@ -417,7 +417,7 @@ await_stats(Expected, Remaining) ->
 
 retain() ->
     release(),
-    Subject = beam_bytes:repeat(<<"hejsan">>, 100000),
+    Subject = beam_binary:copy(<<"hejsan">>, 100000),
     {ok, Pattern} = re:compile("\\w+\\d"),
     {ok, CapturePattern} = re:compile("^(.+)$"),
     {match, [Capture]} = re:run(Subject, CapturePattern, [{capture, [1], binary}]),
@@ -426,12 +426,12 @@ retain() ->
         receive Go -> ok end,
         retained_worker(Subject, Pattern)
     end),
-    1 = ?BEAM_VM:trace(Pid, true, [running]),
+    1 = erlang:trace(Pid, true, [running]),
     Pid ! Go,
     receive {trace, Pid, out, {re, re_match_continue, 2}} -> ok
     after 5000 -> ?BEAM_VM:error(retained_match_did_not_yield)
     end,
-    1 = ?BEAM_VM:trace(Pid, false, [running]),
+    1 = erlang:trace(Pid, false, [running]),
     ?BEAM_VM:demonitor(Ref, [flush]),
     ?RETENTION:put({?MODULE, retained},
                         {Pattern, CapturePattern, Subject, Capture, Pid}),

@@ -174,7 +174,8 @@ def main():
                                 source / 'tests/conformance/support/lists.erl']
                 else:
                     sources += [source / 'src/re.erl', source / 'src/beam_re_errors.erl',
-                                source / 'tests/conformance/beam_runtime_unicode.erl']
+                                source / 'tests/conformance/beam_unicode.erl',
+                                source / 'tests/conformance/beam_binary.erl']
                 run([sdk / 'bin/beam', 'compile', '--deterministic', '-o', fixture, '--', *sources], root, 300)
                 definitions, inventory = [], []
                 for index, path in enumerate(sorted(fixture.glob('*.beam'))):
